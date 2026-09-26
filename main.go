@@ -7,8 +7,9 @@ import (
 	"os/signal"
 
 	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
+
+	"xrayl/internal/dispatcher"
 )
 
 func main() {
@@ -21,7 +22,11 @@ func main() {
 		log.Fatal("BOT_TOKEN is not set")
 	}
 
-	bot, err := tg.New(token, tg.WithDefaultHandler(handler))
+	d := dispatcher.New()
+	bot, err := tg.New(token,
+		tg.WithDefaultHandler(d.Handle),
+		tg.WithMessageTextHandler("addword", tg.MatchTypeCommandStartOnly, d.HandleAddword),
+	)
 	if err != nil {
 		log.Fatal("Can't create bot")
 	}
@@ -29,11 +34,4 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	bot.Start(ctx)
-}
-
-func handler(ctx context.Context, b *tg.Bot, update *models.Update) {
-	b.SendMessage(ctx, &tg.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "Privet-privet",
-	})
 }

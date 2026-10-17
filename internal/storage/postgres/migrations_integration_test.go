@@ -94,7 +94,7 @@ func TestMigrationLifecycle(t *testing.T) {
 		t.Fatalf("repeated up must leave applied schema alone: %v, %v", results, err)
 	}
 	status, err := p.Status(ctx)
-	if err != nil || len(status) != 2 {
+	if err != nil || len(status) != 3 {
 		t.Fatalf("migration status: %v, %v", status, err)
 	}
 	for _, migration := range status {

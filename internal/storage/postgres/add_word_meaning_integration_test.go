@@ -217,13 +217,12 @@ func TestAddWordMeaningMigrationRollbackPreservesData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Down(ctx); err != nil {
+	if _, err := p.DownTo(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	requireEntryCounts(t, db, 1, 1, 1)
 	_, err = addMeaning(ctx, db, 1001, "Book", "Printed work")
 	requireSQLState(t, err, "42883")
-	// Without the second migration's index, direct duplicates are allowed again.
 	var duplicateID int64
 	if err := db.QueryRow("INSERT INTO meanings(user_id, word_id, definition) VALUES (1001, $1, ' PRINTED WORK ') RETURNING id", entry.wordID).Scan(&duplicateID); err != nil {
 		t.Fatal(err)

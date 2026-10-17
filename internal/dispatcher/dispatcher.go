@@ -16,12 +16,14 @@ type sessionKey struct {
 }
 
 type Dispatcher struct {
-	mu      sync.Mutex
-	sessions map[sessionKey]flows.Flow
+	mu         sync.Mutex
+	sessions   map[sessionKey]flows.Flow
+	dictionary flows.Dictionary
+	store      flows.WordStore
 }
 
-func New() *Dispatcher {
-	return &Dispatcher{sessions: make(map[sessionKey]flows.Flow)}
+func New(dictionary flows.Dictionary, store flows.WordStore) *Dispatcher {
+	return &Dispatcher{sessions: make(map[sessionKey]flows.Flow), dictionary: dictionary, store: store}
 }
 
 func (d *Dispatcher) Handle(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -51,7 +53,7 @@ func (d *Dispatcher) HandleAddword(ctx context.Context, b *bot.Bot, update *mode
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	flow := flows.NewAddword()
+	flow := flows.NewAddword(d.dictionary, d.store)
 	d.sessions[key] = flow
 	if flow.Handle(ctx, b, update) {
 		delete(d.sessions, key)

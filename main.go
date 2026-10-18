@@ -56,6 +56,9 @@ func run(ctx context.Context) error {
 	bot, err := tg.New(token,
 		tg.WithDefaultHandler(d.Handle),
 		tg.WithMessageTextHandler("addword", tg.MatchTypeCommandStartOnly, d.HandleAddword),
+		tg.WithMessageTextHandler("words", tg.MatchTypeCommandStartOnly, d.HandleWords),
+		tg.WithMessageTextHandler("addsource", tg.MatchTypeCommandStartOnly, d.HandleAddsource),
+		tg.WithMessageTextHandler("sources", tg.MatchTypeCommandStartOnly, d.HandleSources),
 	)
 	if err != nil {
 		return fmt.Errorf("create Telegram bot: %w", err)

@@ -19,10 +19,10 @@ type Dispatcher struct {
 	mu         sync.Mutex
 	sessions   map[sessionKey]flows.Flow
 	dictionary flows.Dictionary
-	store      flows.WordStore
+	store      flows.Store
 }
 
-func New(dictionary flows.Dictionary, store flows.WordStore) *Dispatcher {
+func New(dictionary flows.Dictionary, store flows.Store) *Dispatcher {
 	return &Dispatcher{sessions: make(map[sessionKey]flows.Flow), dictionary: dictionary, store: store}
 }
 
@@ -39,6 +39,48 @@ func (d *Dispatcher) Handle(ctx context.Context, b *bot.Bot, update *models.Upda
 	if flow == nil {
 		return
 	}
+	if flow.Handle(ctx, b, update) {
+		delete(d.sessions, key)
+	}
+}
+
+func (d *Dispatcher) HandleAddsource(ctx context.Context, b *bot.Bot, update *models.Update) {
+	key, ok := keyFromUpdate(update)
+	if !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	flow := flows.NewAddsource(d.store)
+	d.sessions[key] = flow
+	if flow.Handle(ctx, b, update) {
+		delete(d.sessions, key)
+	}
+}
+
+func (d *Dispatcher) HandleSources(ctx context.Context, b *bot.Bot, update *models.Update) {
+	key, ok := keyFromUpdate(update)
+	if !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	flow := flows.NewSources(d.store)
+	d.sessions[key] = flow
+	if flow.Handle(ctx, b, update) {
+		delete(d.sessions, key)
+	}
+}
+
+func (d *Dispatcher) HandleWords(ctx context.Context, b *bot.Bot, update *models.Update) {
+	key, ok := keyFromUpdate(update)
+	if !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	flow := flows.NewWords(d.store)
+	d.sessions[key] = flow
 	if flow.Handle(ctx, b, update) {
 		delete(d.sessions, key)
 	}

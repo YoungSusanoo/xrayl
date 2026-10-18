@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary"
+	"xrayl/internal/flows"
 	"xrayl/internal/storage"
 )
 
@@ -66,6 +67,27 @@ func (testDictionary) Lookup(context.Context, string) ([]dictionary.Entry, error
 
 type testStore struct{ users []int64 }
 
+func (s *testStore) AddSource(context.Context, int64, string) (storage.AddSourceResult, error) {
+	return storage.AddSourceResult{}, nil
+}
+func (s *testStore) ListSources(context.Context, int64, int, int) ([]storage.Source, error) {
+	return nil, nil
+}
+func (s *testStore) AddContext(context.Context, int64, int64, int64, string, string) (int64, error) {
+	return 0, nil
+}
+func (s *testStore) ListWordContexts(context.Context, int64, int64) ([]storage.WordContext, error) {
+	return nil, nil
+}
+
+func (s *testStore) ListWords(context.Context, int64, int, int) ([]storage.Word, error) {
+	return []storage.Word{{ID: 1, Text: "book"}}, nil
+}
+
+func (s *testStore) ListMeanings(context.Context, int64, int64) ([]storage.Meaning, error) {
+	return []storage.Meaning{{ID: 1, Definition: "A written work."}}, nil
+}
+
 func (s *testStore) AddMeaning(_ context.Context, user int64, _, _ string, _ []string) (storage.AddMeaningResult, error) {
 	s.users = append(s.users, user)
 	return storage.AddMeaningResult{MeaningCreated: true}, nil
@@ -103,4 +125,48 @@ func TestAddwordRestartCancelAndSessionIsolation(t *testing.T) {
 	if len(d.sessions) != 0 || len(store.users) != 1 || store.users[0] != 2 {
 		t.Fatalf("wrong saves: %v; sessions=%d", store.users, len(d.sessions))
 	}
+}
+
+func TestWordsRestartAndSwitchFlows(t *testing.T) {
+	store := &testStore{}
+	d := New(testDictionary{}, store)
+	b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := func(user, chat int64, text string) *models.Update {
+		return &models.Update{Message: &models.Message{Chat: models.Chat{ID: chat}, From: &models.User{ID: user}, Text: text}}
+	}
+	ctx := context.Background()
+	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	first := d.sessions[sessionKey{chatID: 10, userID: 1}]
+	if _, ok := first.(*flows.Words); !ok {
+		t.Fatal("words flow was not started")
+	}
+	d.Handle(ctx, b, message(1, 10, "1"))
+	if d.sessions[sessionKey{chatID: 10, userID: 1}] != first {
+		t.Fatal("selection ended browsing")
+	}
+	d.HandleWords(ctx, b, message(2, 10, "/words"))
+	d.HandleWords(ctx, b, message(1, 20, "/words"))
+	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	if d.sessions[sessionKey{chatID: 10, userID: 1}] == first {
+		t.Fatal("words did not restart")
+	}
+	d.HandleAddword(ctx, b, message(1, 10, "/addword"))
+	if _, ok := d.sessions[sessionKey{chatID: 10, userID: 1}].(*flows.Addword); !ok {
+		t.Fatal("addword did not replace browsing")
+	}
+	d.Handle(ctx, b, message(1, 10, "book"))
+	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	d.Handle(ctx, b, message(1, 10, "1"))
+	if len(store.users) != 0 {
+		t.Fatal("selection reached old addword flow")
+	}
+	d.Handle(ctx, b, message(1, 10, "/cancel"))
+	if len(d.sessions) != 2 {
+		t.Fatal("cancel affected other user/chat")
+	}
+	d.HandleWords(ctx, b, nil)
+	d.HandleWords(ctx, b, &models.Update{})
 }

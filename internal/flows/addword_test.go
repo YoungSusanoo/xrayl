@@ -30,6 +30,13 @@ func (f lookupFunc) Lookup(ctx context.Context, word string) ([]dictionary.Entry
 
 type saveFunc func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error)
 
+func (f saveFunc) ListSources(context.Context, int64, int, int) ([]storage.Source, error) {
+	return nil, nil
+}
+func (f saveFunc) AddContext(context.Context, int64, int64, int64, string, string) (int64, error) {
+	return 0, errors.New("unexpected context save")
+}
+
 func (f saveFunc) AddMeaning(ctx context.Context, userID int64, word, definition string, synonyms []string) (storage.AddMeaningResult, error) {
 	return f(ctx, userID, word, definition, synonyms)
 }

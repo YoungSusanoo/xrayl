@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary"
+	"xrayl/internal/storage"
 )
 
 type addwordState int
@@ -21,21 +22,32 @@ const (
 	initial addwordState = iota
 	inputWord
 	inputMeaning
+	selectSource
+	inputQuote
+	inputLocation
 )
 
 type Addword struct {
 	state      addwordState
 	handlers   map[addwordState]func(*Addword, context.Context, *tg.Bot, *models.Update) bool
 	dictionary Dictionary
-	store      WordStore
+	store      AddwordStore
 	options    []wordOption
+	meaningID  int64
+	saved      bool
+	sourcePage sourcePage
+	source     storage.Source
+	quote      string
 }
 
-func NewAddword(dictionary Dictionary, store WordStore) *Addword {
+func NewAddword(dictionary Dictionary, store AddwordStore) *Addword {
 	handlers := map[addwordState]func(*Addword, context.Context, *tg.Bot, *models.Update) bool{
-		initial:      handleInitial,
-		inputWord:    handleInputWord,
-		inputMeaning: handleInputMeaning,
+		initial:       handleInitial,
+		inputWord:     handleInputWord,
+		inputMeaning:  handleInputMeaning,
+		selectSource:  handleSelectSource,
+		inputQuote:    handleInputQuote,
+		inputLocation: handleInputLocation,
 	}
 	return &Addword{state: initial, handlers: handlers, dictionary: dictionary, store: store}
 }
@@ -45,7 +57,11 @@ func (flow *Addword) Handle(ctx context.Context, bot *tg.Bot, update *models.Upd
 		return false
 	}
 	if strings.TrimSpace(update.Message.Text) == "/cancel" {
-		sendText(ctx, bot, update.Message.Chat.ID, "Добавление отменено.")
+		text := "Добавление отменено."
+		if flow.saved {
+			text = "Контекст не добавлен. Значение осталось в словаре."
+		}
+		sendText(ctx, bot, update.Message.Chat.ID, text)
 		return true
 	}
 	return flow.handlers[flow.state](flow, ctx, bot, update)
@@ -109,6 +125,9 @@ func handleInputMeaning(flow *Addword, ctx context.Context, bot *tg.Bot, update 
 		sendText(ctx, bot, chatID, "Не удалось сохранить значение. Повтори номер или /cancel.")
 		return false
 	}
+	flow.saved = true
+	flow.meaningID = result.MeaningID
+	flow.state = selectSource
 	sendText(ctx, bot, chatID, formatSaved(selected, result.MeaningCreated))
-	return true
+	return flow.showSources(ctx, bot, update, 0)
 }

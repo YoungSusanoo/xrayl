@@ -73,7 +73,7 @@ func (s *testStore) AddSource(context.Context, int64, string) (storage.AddSource
 func (s *testStore) ListSources(context.Context, int64, int, int) ([]storage.Source, error) {
 	return nil, nil
 }
-func (s *testStore) AddContext(context.Context, int64, int64, int64, string, string) (int64, error) {
+func (s *testStore) AddContext(context.Context, int64, int64, int64, string) (int64, error) {
 	return 0, nil
 }
 func (s *testStore) ListWordContexts(context.Context, int64, int64) ([]storage.WordContext, error) {

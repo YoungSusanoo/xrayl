@@ -23,8 +23,7 @@ const (
 	inputWord
 	inputMeaning
 	selectSource
-	inputQuote
-	inputLocation
+	inputContext
 )
 
 type Addword struct {
@@ -37,17 +36,15 @@ type Addword struct {
 	saved      bool
 	sourcePage sourcePage
 	source     storage.Source
-	quote      string
 }
 
 func NewAddword(dictionary Dictionary, store AddwordStore) *Addword {
 	handlers := map[addwordState]func(*Addword, context.Context, *tg.Bot, *models.Update) bool{
-		initial:       handleInitial,
-		inputWord:     handleInputWord,
-		inputMeaning:  handleInputMeaning,
-		selectSource:  handleSelectSource,
-		inputQuote:    handleInputQuote,
-		inputLocation: handleInputLocation,
+		initial:      handleInitial,
+		inputWord:    handleInputWord,
+		inputMeaning: handleInputMeaning,
+		selectSource: handleSelectSource,
+		inputContext: handleInputContext,
 	}
 	return &Addword{state: initial, handlers: handlers, dictionary: dictionary, store: store}
 }

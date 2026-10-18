@@ -38,7 +38,7 @@ type SourceReader interface {
 }
 
 type ContextWriter interface {
-	AddContext(ctx context.Context, userID, meaningID, sourceID int64, quote, location string) (int64, error)
+	AddContext(ctx context.Context, userID, meaningID, sourceID int64, quote string) (int64, error)
 }
 
 type ContextReader interface {

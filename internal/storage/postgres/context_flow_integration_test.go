@@ -87,8 +87,7 @@ func TestContextHTTPToPostgres(t *testing.T) {
 		t.Fatalf("premature context: %d %v", count, err)
 	}
 	send(42, "1")
-	send(42, "Read the book.")
-	if got := send(42, "page 3"); !strings.Contains(got, "Контекст сохранён") {
+	if got := send(42, "Read the book.\npage 3"); !strings.Contains(got, "Контекст сохранён") {
 		t.Fatalf("context confirmation: %s", got)
 	}
 	send(42, "/addword")
@@ -100,12 +99,10 @@ func TestContextHTTPToPostgres(t *testing.T) {
 	send(42, "2")
 	send(42, "1")
 	send(42, "Book a room.")
-	send(42, "/skip")
 	send(42, "/addword")
 	send(42, "book")
 	send(42, "1")
 	send(42, "1")
-	send(42, "Not saved.")
 	if got := send(42, "/cancel"); !strings.Contains(got, "Значение осталось в словаре") {
 		t.Fatalf("cancel: %s", got)
 	}

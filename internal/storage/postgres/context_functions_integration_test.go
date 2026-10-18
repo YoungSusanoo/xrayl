@@ -8,7 +8,14 @@ import (
 )
 
 func TestSourceAndContextFunctions(t *testing.T) {
-	db := migrateTestDatabase(t)
+	db := testDatabase(t)
+	p, err := NewMigrator(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpTo(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	var sourceID int64
 	var name string
@@ -71,10 +78,6 @@ func TestSourceAndContextFunctions(t *testing.T) {
 		if err := db.QueryRow("SELECT prosecdef FROM pg_proc WHERE oid=to_regprocedure($1)", signature).Scan(&definer); err != nil || definer {
 			t.Fatalf("security %s: %v %v", signature, definer, err)
 		}
-	}
-	p, err := NewMigrator(db)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if _, err := p.DownTo(ctx, 4); err != nil {
 		t.Fatal(err)

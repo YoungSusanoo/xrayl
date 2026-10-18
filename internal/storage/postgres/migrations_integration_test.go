@@ -94,7 +94,7 @@ func TestMigrationLifecycle(t *testing.T) {
 		t.Fatalf("repeated up must leave applied schema alone: %v, %v", results, err)
 	}
 	status, err := p.Status(ctx)
-	if err != nil || len(status) != 5 {
+	if err != nil || len(status) != 6 {
 		t.Fatalf("migration status: %v, %v", status, err)
 	}
 	for _, migration := range status {
@@ -154,7 +154,7 @@ func TestSchemaRejectsDuplicatesAndForeignOwners(t *testing.T) {
 			}
 		})
 	}
-	if _, err := db.Exec("INSERT INTO contexts(user_id, meaning_id, source_id, quote, location) VALUES (1001, $1, $2, 'another example', 'page 42')", f.meaning1, f.source1); err != nil {
+	if _, err := db.Exec("INSERT INTO contexts(user_id, meaning_id, source_id, quote) VALUES (1001, $1, $2, 'another example / page 42')", f.meaning1, f.source1); err != nil {
 		t.Fatalf("multiple contexts in one source must be allowed: %v", err)
 	}
 }

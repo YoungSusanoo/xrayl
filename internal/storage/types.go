@@ -15,7 +15,6 @@ type WordContext struct {
 	MeaningID int64
 	Source    Source
 	Quote     string
-	Location  string
 }
 
 type Word struct {

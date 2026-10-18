@@ -15,14 +15,53 @@ import (
 type contextStore struct {
 	saveFunc
 	sourceReaderFunc
-	context func(context.Context, int64, int64, int64, string, string) (int64, error)
+	context func(context.Context, int64, int64, int64, string) (int64, error)
+}
+
+func TestAddwordContextSavesImmediately(t *testing.T) {
+	for _, failConfirmation := range []bool{false, true} {
+		b, sent := telegram(t)
+		calls := 0
+		quote := strings.TrimSpace("The book was open.\nChapter 2 · 00:43\n" + strings.Repeat("Подробный контекст 📖 ", 300))
+		f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }), contextStore{
+			saveFunc: func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
+				return storage.AddMeaningResult{MeaningID: 7}, nil
+			},
+			sourceReaderFunc: func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(1), nil },
+			context: func(ctx context.Context, user, meaning, source int64, text string) (int64, error) {
+				checkReadContext(t, ctx)
+				calls++
+				if user != 42 || meaning != 7 || source != 100 || text != quote {
+					t.Errorf("wrong saved context: %d %d %d %q", user, meaning, source, text)
+				}
+				return 1, nil
+			},
+		})
+		for _, text := range []string{"/addword", "book", "1", "1", " ", "/unknown"} {
+			if f.Handle(context.Background(), b, update(text)) {
+				t.Fatalf("premature completion: %s", text)
+			}
+		}
+		if failConfirmation {
+			sent.failNext()
+		}
+		if !f.Handle(context.Background(), b, update(" "+quote+" ")) || calls != 1 {
+			t.Fatalf("single context input did not save and finish: calls=%d", calls)
+		}
+		if !failConfirmation && !strings.Contains(strings.Join(sent.texts(), ""), quote) {
+			t.Fatal("displayed context truncated")
+		}
+		if strings.Contains(strings.Join(sent.texts(), "\n"), "Укажи страницу") {
+			t.Fatal("separate location prompt remains")
+		}
+	}
 }
 
 func (s contextStore) ListSources(ctx context.Context, user int64, limit, offset int) ([]storage.Source, error) {
 	return s.sourceReaderFunc(ctx, user, limit, offset)
 }
-func (s contextStore) AddContext(ctx context.Context, user, meaning, source int64, quote, location string) (int64, error) {
-	return s.context(ctx, user, meaning, source, quote, location)
+func (s contextStore) AddContext(ctx context.Context, user, meaning, source int64, quote string) (int64, error) {
+	return s.context(ctx, user, meaning, source, quote)
 }
 
 func TestAddwordContextSavesAndRetries(t *testing.T) {
@@ -46,29 +85,29 @@ func TestAddwordContextSavesAndRetries(t *testing.T) {
 			}
 			return all[offset:min(offset+limit, len(all))], nil
 		},
-		context: func(ctx context.Context, user, meaning, source int64, quote, location string) (int64, error) {
+		context: func(ctx context.Context, user, meaning, source int64, quote string) (int64, error) {
 			checkReadContext(t, ctx)
 			contexts++
 			if user != 42 || meaning != 7 || source != 120 {
 				t.Errorf("wrong context IDs: %d %d %d", user, meaning, source)
 			}
-			saved = append(saved, quote+"|"+location)
+			saved = append(saved, quote)
 			if contexts == 1 {
 				return 0, errors.New("unavailable")
 			}
 			return 99, nil
 		},
 	})
-	for _, text := range []string{"/addword", "book", "1", "1", "/next", "/next", "1", " ", "/unknown", " The book was open. ", " page 2 "} {
+	for _, text := range []string{"/addword", "book", "1", "1", "/next", "/next", "1", " ", "/unknown", " The book was open.\npage 2 "} {
 		if f.Handle(context.Background(), b, update(text)) {
 			t.Fatalf("flow completed on %q", text)
 		}
 	}
 	sent.failNext()
-	if !f.Handle(context.Background(), b, update("page 2")) {
+	if !f.Handle(context.Background(), b, update("The book was open.\npage 2")) {
 		t.Fatal("successful context save did not finish")
 	}
-	if saves != 1 || lookups != 1 || lists != 4 || contexts != 2 || !reflect.DeepEqual(saved, []string{"The book was open.|page 2", "The book was open.|page 2"}) {
+	if saves != 1 || lookups != 1 || lists != 4 || contexts != 2 || !reflect.DeepEqual(saved, []string{"The book was open.\npage 2", "The book was open.\npage 2"}) {
 		t.Fatalf("counts: saves=%d lookups=%d lists=%d contexts=%d saved=%v", saves, lookups, lists, contexts, saved)
 	}
 	output := strings.Join(sent.texts(), "\n")
@@ -84,14 +123,11 @@ func TestAddwordContextSkipAndCancel(t *testing.T) {
 		name      string
 		inputs    []string
 		wantSaves int
-		location  string
 	}{
-		{"skip source", []string{"/skip"}, 0, ""},
-		{"cancel source", []string{"/cancel"}, 0, ""},
-		{"skip quote", []string{"1", "/skip"}, 0, ""},
-		{"cancel quote", []string{"1", "/cancel"}, 0, ""},
-		{"skip location", []string{"1", "A book.", "/skip"}, 1, ""},
-		{"cancel location", []string{"1", "A book.", "/cancel"}, 0, ""},
+		{"skip source", []string{"/skip"}, 0},
+		{"cancel source", []string{"/cancel"}, 0},
+		{"skip quote", []string{"1", "/skip"}, 0},
+		{"cancel quote", []string{"1", "/cancel"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, sent := telegram(t)
@@ -102,10 +138,10 @@ func TestAddwordContextSkipAndCancel(t *testing.T) {
 					return storage.AddMeaningResult{MeaningID: 7}, nil
 				},
 				sourceReaderFunc: func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(1), nil },
-				context: func(_ context.Context, _, _, _ int64, quote, location string) (int64, error) {
+				context: func(_ context.Context, _, _, _ int64, quote string) (int64, error) {
 					contextSaves++
-					if quote != "A book." || location != tc.location {
-						t.Errorf("context: %q %q", quote, location)
+					if quote != "A book." {
+						t.Errorf("context: %q", quote)
 					}
 					return 1, nil
 				},
@@ -138,7 +174,7 @@ func TestAddwordContextSendFailureKeepsSelectedSource(t *testing.T) {
 			return storage.AddMeaningResult{MeaningID: 7}, nil
 		},
 		sourceReaderFunc: func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(1), nil },
-		context: func(_ context.Context, _, _, source int64, quote, location string) (int64, error) {
+		context: func(_ context.Context, _, _, source int64, quote string) (int64, error) {
 			contexts++
 			if source != 100 || quote != "Quote." {
 				t.Error("source or quote lost")
@@ -153,8 +189,7 @@ func TestAddwordContextSendFailureKeepsSelectedSource(t *testing.T) {
 	sent.failNext()
 	f.Handle(context.Background(), b, update("1"))
 	sent.failNext()
-	f.Handle(context.Background(), b, update("Quote."))
-	if !f.Handle(context.Background(), b, update("/skip")) || contexts != 1 {
+	if !f.Handle(context.Background(), b, update("Quote.")) || contexts != 1 {
 		t.Fatal("failed send lost context draft")
 	}
 }

@@ -44,9 +44,6 @@ func formatWordMeanings(word storage.Word, meanings []storage.Meaning, contexts 
 			if item.Quote != "" {
 				fmt.Fprintln(&text, item.Quote)
 			}
-			if item.Location != "" {
-				fmt.Fprintf(&text, "Место: %s\n", item.Location)
-			}
 		}
 		text.WriteString("\n")
 	}

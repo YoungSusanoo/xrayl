@@ -62,48 +62,29 @@ func handleSelectSource(flow *Addword, ctx context.Context, bot *tg.Bot, update 
 		return false
 	}
 	flow.source = flow.sourcePage.items[number-1]
-	flow.state = inputQuote
-	sendText(ctx, bot, chatID, "Источник: "+flow.source.Name+"\nПришли предложение или фрагмент, где встретилось слово.\n/skip — закончить без контекста, /cancel — отменить ввод контекста.")
+	flow.state = inputContext
+	sendText(ctx, bot, chatID, "Источник: "+flow.source.Name+"\nПришли контекст одним сообщением. При желании добавь главу, страницу или таймкод.\n/skip — закончить без контекста, /cancel — отменить ввод контекста.")
 	return false
 }
 
-func handleInputQuote(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
+func handleInputContext(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
 	text := strings.TrimSpace(update.Message.Text)
 	chatID := update.Message.Chat.ID
 	if text == "/skip" {
 		return finishWithoutContext(ctx, bot, chatID)
 	}
 	if text == "" || strings.HasPrefix(text, "/") {
-		sendText(ctx, bot, chatID, "Пришли цитату текстом или /skip, чтобы закончить без контекста.")
-		return false
-	}
-	flow.quote = text
-	flow.state = inputLocation
-	sendText(ctx, bot, chatID, "Укажи страницу, главу или таймкод.\n/skip — сохранить без места, /cancel — отменить ввод контекста.")
-	return false
-}
-
-func handleInputLocation(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	location := strings.TrimSpace(update.Message.Text)
-	chatID := update.Message.Chat.ID
-	if location == "/skip" {
-		location = ""
-	} else if location == "" || strings.HasPrefix(location, "/") {
-		sendText(ctx, bot, chatID, "Пришли место текстом или /skip, чтобы сохранить без места.")
+		sendText(ctx, bot, chatID, "Пришли контекст текстом или /skip, чтобы закончить без контекста.")
 		return false
 	}
 	saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_, err := flow.store.AddContext(saveCtx, update.Message.From.ID, flow.meaningID, flow.source.ID, flow.quote, location)
+	_, err := flow.store.AddContext(saveCtx, update.Message.From.ID, flow.meaningID, flow.source.ID, text)
 	cancel()
 	if err != nil {
 		log.Printf("save context failed: %v", err)
-		sendText(ctx, bot, chatID, "Не удалось сохранить контекст. Повтори место или /skip для сохранения без места. /cancel — закончить, сохранив значение.")
+		sendText(ctx, bot, chatID, "Не удалось сохранить контекст. Пришли контекст ещё раз, /skip или /cancel. Значение осталось в словаре.")
 		return false
 	}
-	text := "Контекст сохранён.\n\nИсточник: " + flow.source.Name + "\n" + flow.quote
-	if location != "" {
-		text += "\nМесто: " + location
-	}
-	sendText(ctx, bot, chatID, text)
+	sendText(ctx, bot, chatID, "Контекст сохранён.\n\nИсточник: "+flow.source.Name+"\n"+text)
 	return true
 }

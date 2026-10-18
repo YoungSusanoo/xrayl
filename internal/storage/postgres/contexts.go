@@ -38,18 +38,18 @@ func (s *Store) ListSources(ctx context.Context, userID int64, limit, offset int
 	return sources, nil
 }
 
-func (s *Store) AddContext(ctx context.Context, userID, meaningID, sourceID int64, quote, location string) (int64, error) {
+func (s *Store) AddContext(ctx context.Context, userID, meaningID, sourceID int64, quote string) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var id int64
-	err := s.db.QueryRowContext(ctx, "SELECT add_context($1,$2,$3,$4,$5)", userID, meaningID, sourceID, quote, location).Scan(&id)
+	err := s.db.QueryRowContext(ctx, "SELECT add_context($1,$2,$3,$4)", userID, meaningID, sourceID, quote).Scan(&id)
 	return id, err
 }
 
 func (s *Store) ListWordContexts(ctx context.Context, userID, wordID int64) ([]storage.WordContext, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := s.db.QueryContext(ctx, "SELECT context_id,meaning_id,source_id,source_name,quote,location FROM list_word_contexts($1,$2)", userID, wordID)
+	rows, err := s.db.QueryContext(ctx, "SELECT context_id,meaning_id,source_id,source_name,quote FROM list_word_contexts($1,$2)", userID, wordID)
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +57,11 @@ func (s *Store) ListWordContexts(ctx context.Context, userID, wordID int64) ([]s
 	var contexts []storage.WordContext
 	for rows.Next() {
 		var item storage.WordContext
-		var quote, location sql.NullString
-		if err := rows.Scan(&item.ID, &item.MeaningID, &item.Source.ID, &item.Source.Name, &quote, &location); err != nil {
+		var quote sql.NullString
+		if err := rows.Scan(&item.ID, &item.MeaningID, &item.Source.ID, &item.Source.Name, &quote); err != nil {
 			return nil, err
 		}
 		item.Quote = quote.String
-		item.Location = location.String
 		contexts = append(contexts, item)
 	}
 	if err := rows.Err(); err != nil {

@@ -35,7 +35,7 @@ func TestWordsDisplaysContextsUnderTheirMeanings(t *testing.T) {
 		if calls == 1 {
 			return nil, errors.New("unavailable")
 		}
-		return []storage.WordContext{{ID: 1, MeaningID: 2, Source: storage.Source{ID: 9, Name: "Dune"}, Quote: "Book a room.", Location: "page 2"}, {ID: 2, MeaningID: 1, Source: storage.Source{Name: "Article"}, Quote: "Read a book."}}, nil
+		return []storage.WordContext{{ID: 1, MeaningID: 2, Source: storage.Source{ID: 9, Name: "Dune"}, Quote: "Book a room.\npage 2"}, {ID: 2, MeaningID: 1, Source: storage.Source{Name: "Article"}, Quote: "Read a book."}}, nil
 	}})
 	f.Handle(context.Background(), b, update("/words"))
 	f.Handle(context.Background(), b, update("1"))

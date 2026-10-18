@@ -38,7 +38,7 @@ func TestStoreSourcesAndContexts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.AddContext(ctx, 42, meaning.MeaningID, source.Source.ID, " A book. ", "")
+	id, err := s.AddContext(ctx, 42, meaning.MeaningID, source.Source.ID, " A book. ")
 	if err != nil || id == 0 {
 		t.Fatalf("save context: %d %v", id, err)
 	}
@@ -50,7 +50,7 @@ func TestStoreSourcesAndContexts(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO contexts(user_id,meaning_id,source_id) VALUES(42,$1,$2)", meaning.MeaningID, source.Source.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.ListWordContexts(ctx, 42, meaning.WordID); err != nil || len(got) != 2 || got[1].Quote != "" || got[1].Location != "" {
+	if got, err := s.ListWordContexts(ctx, 42, meaning.WordID); err != nil || len(got) != 2 || got[1].Quote != "" {
 		t.Fatalf("legacy NULL context: %+v %v", got, err)
 	}
 	if got, err := s.ListWordContexts(ctx, 43, meaning.WordID); err != nil || len(got) != 0 {
@@ -66,7 +66,7 @@ func TestStoreSourcesAndContexts(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel sources: %v", err)
 	}
-	_, err = s.AddContext(canceled, 42, meaning.MeaningID, source.Source.ID, "Canceled", "")
+	_, err = s.AddContext(canceled, 42, meaning.MeaningID, source.Source.ID, "Canceled")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel context: %v", err)
 	}

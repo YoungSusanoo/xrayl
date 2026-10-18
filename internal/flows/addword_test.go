@@ -33,7 +33,7 @@ type saveFunc func(context.Context, int64, string, string, []string) (storage.Ad
 func (f saveFunc) ListSources(context.Context, int64, int, int) ([]storage.Source, error) {
 	return nil, nil
 }
-func (f saveFunc) AddContext(context.Context, int64, int64, int64, string, string) (int64, error) {
+func (f saveFunc) AddContext(context.Context, int64, int64, int64, string) (int64, error) {
 	return 0, errors.New("unexpected context save")
 }
 

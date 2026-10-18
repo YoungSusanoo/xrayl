@@ -16,14 +16,21 @@ type sessionKey struct {
 }
 
 type Dispatcher struct {
-	mu         sync.Mutex
-	sessions   map[sessionKey]flows.Flow
-	dictionary flows.Dictionary
-	store      flows.Store
+	mu        sync.Mutex
+	sessions  map[sessionKey]flows.Flow
+	factories map[string]func() flows.Flow
 }
 
 func New(dictionary flows.Dictionary, store flows.Store) *Dispatcher {
-	return &Dispatcher{sessions: make(map[sessionKey]flows.Flow), dictionary: dictionary, store: store}
+	return &Dispatcher{
+		sessions: make(map[sessionKey]flows.Flow),
+		factories: map[string]func() flows.Flow{
+			"addword":   func() flows.Flow { return flows.NewAddword(dictionary, store) },
+			"words":     func() flows.Flow { return flows.NewWords(store) },
+			"addsource": func() flows.Flow { return flows.NewAddsource(store) },
+			"sources":   func() flows.Flow { return flows.NewSources(store) },
+		},
+	}
 }
 
 func (d *Dispatcher) Handle(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -35,68 +42,24 @@ func (d *Dispatcher) Handle(ctx context.Context, b *bot.Bot, update *models.Upda
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	message := update.Message
+	for _, entity := range message.Entities {
+		if entity.Type != models.MessageEntityTypeBotCommand || entity.Offset != 0 || entity.Length <= 1 || entity.Length > len(message.Text) {
+			continue
+		}
+		if message.Text[0] != '/' {
+			continue
+		}
+		if create, ok := d.factories[message.Text[1:entity.Length]]; ok {
+			d.sessions[key] = create()
+			break
+		}
+	}
+
 	flow := d.sessions[key]
 	if flow == nil {
 		return
 	}
-	if flow.Handle(ctx, b, update) {
-		delete(d.sessions, key)
-	}
-}
-
-func (d *Dispatcher) HandleAddsource(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, ok := keyFromUpdate(update)
-	if !ok {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	flow := flows.NewAddsource(d.store)
-	d.sessions[key] = flow
-	if flow.Handle(ctx, b, update) {
-		delete(d.sessions, key)
-	}
-}
-
-func (d *Dispatcher) HandleSources(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, ok := keyFromUpdate(update)
-	if !ok {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	flow := flows.NewSources(d.store)
-	d.sessions[key] = flow
-	if flow.Handle(ctx, b, update) {
-		delete(d.sessions, key)
-	}
-}
-
-func (d *Dispatcher) HandleWords(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, ok := keyFromUpdate(update)
-	if !ok {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	flow := flows.NewWords(d.store)
-	d.sessions[key] = flow
-	if flow.Handle(ctx, b, update) {
-		delete(d.sessions, key)
-	}
-}
-
-func (d *Dispatcher) HandleAddword(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, ok := keyFromUpdate(update)
-	if !ok {
-		return
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	flow := flows.NewAddword(d.dictionary, d.store)
-	d.sessions[key] = flow
 	if flow.Handle(ctx, b, update) {
 		delete(d.sessions, key)
 	}

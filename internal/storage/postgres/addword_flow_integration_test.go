@@ -55,7 +55,7 @@ func TestAddwordHTTPToPostgres(t *testing.T) {
 	defer telegramServer.Close()
 	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL+"/api/v1", dictionaryServer.Client()), NewStore(db))
 	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
-		tg.WithDefaultHandler(d.Handle), tg.WithMessageTextHandler("addword", tg.MatchTypeCommandStartOnly, d.HandleAddword))
+		tg.WithDefaultHandler(d.Handle))
 	if err != nil {
 		t.Fatal(err)
 	}

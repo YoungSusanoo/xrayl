@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -107,14 +108,14 @@ func TestAddwordRestartCancelAndSessionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := func(user int64, text string) *models.Update {
-		return &models.Update{Message: &models.Message{Chat: models.Chat{ID: 10}, From: &models.User{ID: user}, Text: text}}
+		return commandUpdate(user, 10, text)
 	}
 	ctx := context.Background()
-	d.HandleAddword(ctx, b, message(1, "/addword"))
+	d.Handle(ctx, b, message(1, "/addword"))
 	d.Handle(ctx, b, message(1, "book"))
-	d.HandleAddword(ctx, b, message(2, "/addword"))
+	d.Handle(ctx, b, message(2, "/addword"))
 	d.Handle(ctx, b, message(2, "book"))
-	d.HandleAddword(ctx, b, message(1, "/addword"))
+	d.Handle(ctx, b, message(1, "/addword"))
 	d.Handle(ctx, b, message(1, "/cancel"))
 	if len(d.sessions) != 1 || d.sessions[sessionKey{chatID: 10, userID: 2}] == nil {
 		t.Fatal("restart/cancel changed another user's session")
@@ -135,10 +136,10 @@ func TestWordsRestartAndSwitchFlows(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := func(user, chat int64, text string) *models.Update {
-		return &models.Update{Message: &models.Message{Chat: models.Chat{ID: chat}, From: &models.User{ID: user}, Text: text}}
+		return commandUpdate(user, chat, text)
 	}
 	ctx := context.Background()
-	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	d.Handle(ctx, b, message(1, 10, "/words"))
 	first := d.sessions[sessionKey{chatID: 10, userID: 1}]
 	if _, ok := first.(*flows.Words); !ok {
 		t.Fatal("words flow was not started")
@@ -147,18 +148,18 @@ func TestWordsRestartAndSwitchFlows(t *testing.T) {
 	if d.sessions[sessionKey{chatID: 10, userID: 1}] != first {
 		t.Fatal("selection ended browsing")
 	}
-	d.HandleWords(ctx, b, message(2, 10, "/words"))
-	d.HandleWords(ctx, b, message(1, 20, "/words"))
-	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	d.Handle(ctx, b, message(2, 10, "/words"))
+	d.Handle(ctx, b, message(1, 20, "/words"))
+	d.Handle(ctx, b, message(1, 10, "/words"))
 	if d.sessions[sessionKey{chatID: 10, userID: 1}] == first {
 		t.Fatal("words did not restart")
 	}
-	d.HandleAddword(ctx, b, message(1, 10, "/addword"))
+	d.Handle(ctx, b, message(1, 10, "/addword"))
 	if _, ok := d.sessions[sessionKey{chatID: 10, userID: 1}].(*flows.Addword); !ok {
 		t.Fatal("addword did not replace browsing")
 	}
 	d.Handle(ctx, b, message(1, 10, "book"))
-	d.HandleWords(ctx, b, message(1, 10, "/words"))
+	d.Handle(ctx, b, message(1, 10, "/words"))
 	d.Handle(ctx, b, message(1, 10, "1"))
 	if len(store.users) != 0 {
 		t.Fatal("selection reached old addword flow")
@@ -167,6 +168,100 @@ func TestWordsRestartAndSwitchFlows(t *testing.T) {
 	if len(d.sessions) != 2 {
 		t.Fatal("cancel affected other user/chat")
 	}
-	d.HandleWords(ctx, b, nil)
-	d.HandleWords(ctx, b, &models.Update{})
+	d.Handle(ctx, b, nil)
+	d.Handle(ctx, b, &models.Update{})
+}
+
+func commandUpdate(user, chat int64, text string) *models.Update {
+	message := &models.Message{Chat: models.Chat{ID: chat}, From: &models.User{ID: user}, Text: text}
+	if strings.HasPrefix(text, "/") {
+		command := strings.Fields(text)[0]
+		message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: len(command)}}
+	}
+	return &models.Update{Message: message}
+}
+
+func TestHandleStartsEveryMainCommand(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    flows.Flow
+	}{
+		{"/addword", &flows.Addword{}},
+		{"/words", &flows.Words{}},
+		{"/addsource", &flows.Addsource{}},
+		{"/sources", nil},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			d := New(testDictionary{}, &testStore{})
+			key := sessionKey{chatID: 10, userID: 42}
+			previous := &testFlow{}
+			d.sessions[key] = previous
+			b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Handle(context.Background(), b, commandUpdate(42, 10, tc.command))
+			if previous.calls != 0 || reflect.TypeOf(d.sessions[key]) != reflect.TypeOf(tc.want) {
+				t.Fatalf("wrong command flow: got %T want %T previouscalls=%d", d.sessions[key], tc.want, previous.calls)
+			}
+		})
+	}
+}
+
+func TestHandleCommandRecognition(t *testing.T) {
+	entity := func(offset, length int) []models.MessageEntity {
+		return []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: offset, Length: length}}
+	}
+	for _, tc := range []struct {
+		name, text string
+		entities   []models.MessageEntity
+		restart    bool
+	}{
+		{"plain command", "/words", entity(0, 6), true},
+		{"arguments", "/words anything", entity(0, 6), true},
+		{"multiline arguments", "/words\nanything", entity(0, 6), true},
+		{"missing entity", "/words", nil, false},
+		{"unknown command", "/unknown", entity(0, 8), false},
+		{"flow command", "/cancel", entity(0, 7), false},
+		{"case sensitive", "/Words", entity(0, 6), false},
+		{"addressed command", "/words@my_bot", entity(0, 13), false},
+		{"middle of text", "hi /words", entity(3, 6), false},
+		{"unicode prefix", "📖 /words", entity(3, 6), false},
+		{"caption", "", entity(0, 6), false},
+		{"negative offset", "/words", entity(-1, 6), false},
+		{"negative length", "/words", entity(0, -1), false},
+		{"zero length", "/words", entity(0, 0), false},
+		{"slash only", "/", entity(0, 1), false},
+		{"out of bounds", "/words", entity(0, 99), false},
+		{"overflow length", "/words", entity(0, int(^uint(0)>>1)), false},
+		{"overflow offset", "/words", entity(int(^uint(0)>>1), 6), false},
+		{"wrong entity", "/words", []models.MessageEntity{{Type: models.MessageEntityTypeBold, Length: 6}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New(testDictionary{}, &testStore{})
+			key := sessionKey{chatID: 10, userID: 42}
+			previous := &testFlow{}
+			d.sessions[key] = previous
+			b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			update := &models.Update{Message: &models.Message{Chat: models.Chat{ID: 10}, From: &models.User{ID: 42}, Text: tc.text, Entities: tc.entities}}
+			d.Handle(context.Background(), b, update)
+			if tc.restart {
+				if _, ok := d.sessions[key].(*flows.Words); !ok || previous.calls != 0 {
+					t.Fatalf("command did not replace flow: %T calls=%d", d.sessions[key], previous.calls)
+				}
+			} else if d.sessions[key] != previous || previous.calls != 1 {
+				t.Fatalf("message not passed to existing flow: %T calls=%d", d.sessions[key], previous.calls)
+			}
+		})
+	}
+	d := New(nil, nil)
+	for _, u := range []*models.Update{nil, {}, {Message: &models.Message{}}, commandUpdate(42, 10, "/unknown"), commandUpdate(42, 10, "text")} {
+		d.Handle(context.Background(), nil, u)
+	}
+	if len(d.sessions) != 0 {
+		t.Fatal("invalid/unrouted input created a session")
+	}
 }

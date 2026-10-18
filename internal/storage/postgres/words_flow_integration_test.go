@@ -49,9 +49,7 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 	store := NewStore(db)
 	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), store)
 	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
-		tg.WithDefaultHandler(d.Handle),
-		tg.WithMessageTextHandler("addword", tg.MatchTypeCommandStartOnly, d.HandleAddword),
-		tg.WithMessageTextHandler("words", tg.MatchTypeCommandStartOnly, d.HandleWords))
+		tg.WithDefaultHandler(d.Handle))
 	if err != nil {
 		t.Fatal(err)
 	}

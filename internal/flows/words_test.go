@@ -7,10 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
-	"unicode/utf16"
-
-	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/flows"
 	"xrayl/internal/storage"
@@ -40,22 +36,13 @@ func wordFixture(count int) []storage.Word {
 	return words
 }
 
-func checkReadContext(t *testing.T, ctx context.Context) {
-	t.Helper()
-	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) > 5*time.Second {
-		t.Error("read must have a five-second deadline")
-	}
-}
-
 func TestWordsPagesAndRepeatedSelection(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	all := wordFixture(41)
 	var offsets []int
 	var selected []int64
 	f := flows.NewWords(readStore{
 		words: func(ctx context.Context, user int64, limit, offset int) ([]storage.Word, error) {
-			checkReadContext(t, ctx)
 			if user != 42 || limit != 21 {
 				t.Errorf("wrong page query: %d, %d", user, limit)
 			}
@@ -63,7 +50,6 @@ func TestWordsPagesAndRepeatedSelection(t *testing.T) {
 			return all[offset:min(offset+limit, len(all))], nil
 		},
 		meanings: func(ctx context.Context, user, word int64) ([]storage.Meaning, error) {
-			checkReadContext(t, ctx)
 			if user != 42 {
 				t.Error("wrong meaning owner")
 			}
@@ -72,7 +58,7 @@ func TestWordsPagesAndRepeatedSelection(t *testing.T) {
 		},
 	})
 	for _, text := range []string{"/words", "/prev", "1", "20", "/next", "1", "/next", "/next", "1", "/prev", "2"} {
-		if f.Handle(context.Background(), b, update(text)) {
+		if handle(f, b, update(text)) {
 			t.Fatalf("browsing completed on %s", text)
 		}
 	}
@@ -88,7 +74,7 @@ func TestWordsPagesAndRepeatedSelection(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	if !f.Handle(context.Background(), b, update("/cancel")) {
+	if !handle(f, b, update("/cancel")) {
 		t.Fatal("cancel did not finish")
 	}
 }
@@ -96,10 +82,10 @@ func TestWordsPagesAndRepeatedSelection(t *testing.T) {
 func TestWordsEmptyAndInvalidInput(t *testing.T) {
 	for _, count := range []int{0, 1, 20} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			b, sent := telegram(t)
+			b, sent := outputs(t)
 			reads := 0
 			f := flows.NewWords(readStore{words: func(context.Context, int64, int, int) ([]storage.Word, error) { return wordFixture(count), nil }, meanings: func(context.Context, int64, int64) ([]storage.Meaning, error) { reads++; return nil, nil }})
-			done := f.Handle(context.Background(), b, update("/words"))
+			done := handle(f, b, update("/words"))
 			if done != (count == 0) {
 				t.Fatalf("empty lifecycle: %v", done)
 			}
@@ -110,7 +96,7 @@ func TestWordsEmptyAndInvalidInput(t *testing.T) {
 				return
 			}
 			for _, input := range []string{"", "0", "-1", "21", "1.5", "hello", "/unknown", "/next", "/prev"} {
-				if f.Handle(context.Background(), b, update(input)) {
+				if handle(f, b, update(input)) {
 					t.Fatal("invalid input ended browsing")
 				}
 			}
@@ -120,7 +106,7 @@ func TestWordsEmptyAndInvalidInput(t *testing.T) {
 			if strings.Contains(sent.texts()[0], "/next") {
 				t.Fatal("last page advertises next")
 			}
-			f.Handle(context.Background(), b, update("1"))
+			handle(f, b, update("1"))
 			if reads != 1 || !strings.Contains(strings.Join(sent.texts(), ""), "Нет сохранённых значений") {
 				t.Fatal("missing meaning was not explained")
 			}
@@ -129,7 +115,7 @@ func TestWordsEmptyAndInvalidInput(t *testing.T) {
 }
 
 func TestWordsReadFailuresPreserveSelection(t *testing.T) {
-	b, _ := telegram(t)
+	b, _ := outputs(t)
 	pageCalls, meaningCalls := 0, 0
 	var selected []int64
 	f := flows.NewWords(readStore{words: func(context.Context, int64, int, int) ([]storage.Word, error) {
@@ -147,7 +133,7 @@ func TestWordsReadFailuresPreserveSelection(t *testing.T) {
 		return []storage.Meaning{{Definition: "A meaning."}}, nil
 	}})
 	for _, input := range []string{"/words", "retry", "/next", "2", "2"} {
-		if f.Handle(context.Background(), b, update(input)) {
+		if handle(f, b, update(input)) {
 			t.Fatal("read failure ended browsing")
 		}
 	}
@@ -156,8 +142,8 @@ func TestWordsReadFailuresPreserveSelection(t *testing.T) {
 	}
 }
 
-func TestWordsSendFailureKeepsLoadedPage(t *testing.T) {
-	b, sent := telegram(t)
+func TestWordsKeepsSelectionAcrossPageChanges(t *testing.T) {
+	b, _ := outputs(t)
 	all := wordFixture(21)
 	var selected []int64
 	f := flows.NewWords(readStore{words: func(_ context.Context, _ int64, limit, offset int) ([]storage.Word, error) {
@@ -166,50 +152,37 @@ func TestWordsSendFailureKeepsLoadedPage(t *testing.T) {
 		selected = append(selected, word)
 		return []storage.Meaning{{Definition: "Meaning."}}, nil
 	}})
-	sent.failNext()
-	f.Handle(context.Background(), b, update("/words"))
-	f.Handle(context.Background(), b, update("1"))
-	sent.failNext()
-	f.Handle(context.Background(), b, update("/next"))
-	f.Handle(context.Background(), b, update("1"))
-	sent.failNext()
-	f.Handle(context.Background(), b, update("1"))
-	f.Handle(context.Background(), b, update("1"))
+	handle(f, b, update("/words"))
+	handle(f, b, update("1"))
+	handle(f, b, update("/next"))
+	handle(f, b, update("1"))
+	handle(f, b, update("1"))
+	handle(f, b, update("1"))
 	if !reflect.DeepEqual(selected, []int64{100, 120, 120, 120}) {
 		t.Fatalf("failed send lost selection: %v", selected)
 	}
 }
 
-func TestWordsInvalidUpdatesAndCancelBeforeLoading(t *testing.T) {
+func TestWordsCancelBeforeLoading(t *testing.T) {
 	f := flows.NewWords(nil)
-	for _, u := range []*models.Update{nil, {}, {Message: &models.Message{}}} {
-		if f.Handle(context.Background(), nil, u) {
-			t.Fatal("invalid update ended flow")
-		}
-	}
-	b, _ := telegram(t)
-	if !f.Handle(context.Background(), b, update("/cancel")) {
+	b, _ := outputs(t)
+	if !handle(f, b, update("/cancel")) {
 		t.Fatal("initial cancellation failed")
 	}
 }
 
 func TestWordsLongMeaningsAndSynonyms(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	definition := strings.Repeat("A long definition 📖. ", 600)
 	f := flows.NewWords(readStore{words: func(context.Context, int64, int, int) ([]storage.Word, error) {
 		return []storage.Word{{ID: 1, Text: "book"}}, nil
 	}, meanings: func(context.Context, int64, int64) ([]storage.Meaning, error) {
 		return []storage.Meaning{{Definition: definition, Synonyms: []string{"volume", "tome"}}, {Definition: "Another meaning."}}, nil
 	}})
-	f.Handle(context.Background(), b, update("/words"))
-	f.Handle(context.Background(), b, update("1"))
+	handle(f, b, update("/words"))
+	handle(f, b, update("1"))
 	joined := strings.Join(sent.texts(), "")
 	if !strings.Contains(joined, definition) || !strings.Contains(joined, "volume, tome") || !strings.Contains(joined, "Another meaning.") {
 		t.Fatal("word card truncated")
-	}
-	for _, text := range sent.texts() {
-		if len(utf16.Encode([]rune(text))) > 3000 {
-			t.Fatal("oversized message")
-		}
 	}
 }

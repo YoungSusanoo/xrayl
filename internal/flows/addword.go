@@ -7,16 +7,20 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"time"
-
-	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary"
 	"xrayl/internal/storage"
 )
 
 type addwordState int
+
+type wordOption struct {
+	word         string
+	partOfSpeech string
+	definition   dictionary.Definition
+	sourceURLs   []string
+	license      dictionary.License
+}
 
 const (
 	initial addwordState = iota
@@ -28,7 +32,6 @@ const (
 
 type Addword struct {
 	state      addwordState
-	handlers   map[addwordState]func(*Addword, context.Context, *tg.Bot, *models.Update) bool
 	dictionary Dictionary
 	store      AddwordStore
 	options    []wordOption
@@ -39,92 +42,144 @@ type Addword struct {
 }
 
 func NewAddword(dictionary Dictionary, store AddwordStore) *Addword {
-	handlers := map[addwordState]func(*Addword, context.Context, *tg.Bot, *models.Update) bool{
-		initial:      handleInitial,
-		inputWord:    handleInputWord,
-		inputMeaning: handleInputMeaning,
-		selectSource: handleSelectSource,
-		inputContext: handleInputContext,
-	}
-	return &Addword{state: initial, handlers: handlers, dictionary: dictionary, store: store}
+	return &Addword{dictionary: dictionary, store: store}
 }
 
-func (flow *Addword) Handle(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	if update == nil || update.Message == nil || update.Message.From == nil {
-		return false
-	}
-	if strings.TrimSpace(update.Message.Text) == "/cancel" {
+func (flow *Addword) Handle(ctx context.Context, message Message) Result {
+	if strings.TrimSpace(message.Text) == "/cancel" {
 		text := "Добавление отменено."
 		if flow.saved {
 			text = "Контекст не добавлен. Значение осталось в словаре."
 		}
-		sendText(ctx, bot, update.Message.Chat.ID, text)
-		return true
+		return Result{Texts: []string{text}, Done: true}
 	}
-	return flow.handlers[flow.state](flow, ctx, bot, update)
+	switch flow.state {
+	case initial:
+		return flow.handleInitial(ctx, message)
+	case inputWord:
+		return flow.handleInputWord(ctx, message)
+	case inputMeaning:
+		return flow.handleInputMeaning(ctx, message)
+	case selectSource:
+		return flow.handleSelectSource(ctx, message)
+	case inputContext:
+		return flow.handleInputContext(ctx, message)
+	default:
+		panic("invalid addword state")
+	}
 }
 
-func handleInitial(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	if sendText(ctx, bot, update.Message.Chat.ID, "Введи английское слово или /cancel.") == nil {
-		flow.state = inputWord
-	}
-	return false
+func (flow *Addword) handleInitial(ctx context.Context, message Message) Result {
+	flow.state = inputWord
+	return Result{Texts: []string{"Введи английское слово или /cancel."}}
 }
 
-func handleInputWord(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	word := strings.TrimSpace(update.Message.Text)
-	chatID := update.Message.Chat.ID
+func (flow *Addword) handleInputWord(ctx context.Context, message Message) Result {
+	word := strings.TrimSpace(message.Text)
 	if word == "" || strings.HasPrefix(word, "/") {
-		sendText(ctx, bot, chatID, "Введи слово текстом или /cancel.")
-		return false
+		return Result{Texts: []string{"Введи слово текстом или /cancel."}}
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	entries, err := flow.dictionary.Lookup(lookupCtx, word)
-	cancel()
+	entries, err := flow.dictionary.Lookup(ctx, word)
 	if err != nil {
 		log.Printf("dictionary lookup failed: %v", err)
-		message := "Словарь сейчас недоступен. Попробуй ввести слово ещё раз или /cancel."
+		notice := "Словарь сейчас недоступен. Попробуй ввести слово ещё раз или /cancel."
 		switch {
 		case errors.Is(err, dictionary.ErrNotFound):
-			message = "Слово не найдено. Введи другое слово или /cancel."
+			notice = "Слово не найдено. Введи другое слово или /cancel."
 		case errors.Is(err, dictionary.ErrRateLimited):
-			message = "Словарь ограничил запросы. Повтори ввод слова немного позже или /cancel."
+			notice = "Словарь ограничил запросы. Повтори ввод слова немного позже или /cancel."
 		}
-		sendText(ctx, bot, chatID, message)
-		return false
+		return Result{Texts: []string{notice}}
 	}
 	options := makeOptions(entries)
 	if len(options) == 0 {
 		log.Printf("dictionary lookup returned no usable definitions")
-		sendText(ctx, bot, chatID, "Словарь не вернул определений. Введи другое слово или /cancel.")
-		return false
+		return Result{Texts: []string{"Словарь не вернул определений. Введи другое слово или /cancel."}}
 	}
-	if sendText(ctx, bot, chatID, formatChoices(word, options, entries)) == nil {
-		flow.options = options
-		flow.state = inputMeaning
-	}
-	return false
+	flow.options = options
+	flow.state = inputMeaning
+	return Result{Texts: []string{formatChoices(word, options, entries)}}
 }
 
-func handleInputMeaning(flow *Addword, ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	number, err := strconv.Atoi(strings.TrimSpace(update.Message.Text))
-	chatID := update.Message.Chat.ID
+func (flow *Addword) handleInputMeaning(ctx context.Context, message Message) Result {
+	number, err := strconv.Atoi(strings.TrimSpace(message.Text))
 	if err != nil || number < 1 || number > len(flow.options) {
-		sendText(ctx, bot, chatID, fmt.Sprintf("Пришли номер от 1 до %d или /cancel.", len(flow.options)))
-		return false
+		return Result{Texts: []string{fmt.Sprintf("Пришли номер от 1 до %d или /cancel.", len(flow.options))}}
 	}
 	selected := flow.options[number-1]
-	saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	result, err := flow.store.AddMeaning(saveCtx, update.Message.From.ID, selected.word, selected.definition.Text, selected.definition.Synonyms)
-	cancel()
+	saved, err := flow.store.AddMeaning(ctx, message.UserID, selected.word, selected.definition.Text, selected.definition.Synonyms)
 	if err != nil {
-		log.Printf("save word meaning failed for user %d: %v", update.Message.From.ID, err)
-		sendText(ctx, bot, chatID, "Не удалось сохранить значение. Повтори номер или /cancel.")
-		return false
+		log.Printf("save word meaning failed for user %d: %v", message.UserID, err)
+		return Result{Texts: []string{"Не удалось сохранить значение. Повтори номер или /cancel."}}
 	}
 	flow.saved = true
-	flow.meaningID = result.MeaningID
+	flow.meaningID = saved.MeaningID
 	flow.state = selectSource
-	sendText(ctx, bot, chatID, formatSaved(selected, result.MeaningCreated))
-	return flow.showSources(ctx, bot, update, 0)
+	response := flow.showSources(ctx, message, 0)
+	response.Texts = append([]string{formatSaved(selected, saved.MeaningCreated)}, response.Texts...)
+	return response
+}
+
+func makeOptions(entries []dictionary.Entry) []wordOption {
+	var options []wordOption
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Word) == "" {
+			continue
+		}
+		for _, meaning := range entry.Meanings {
+			for _, definition := range meaning.Definitions {
+				if strings.TrimSpace(definition.Text) == "" {
+					continue
+				}
+				options = append(options, wordOption{word: entry.Word, partOfSpeech: meaning.PartOfSpeech, definition: definition, sourceURLs: entry.SourceURLs, license: entry.License})
+			}
+		}
+	}
+	return options
+}
+
+func formatChoices(word string, options []wordOption, entries []dictionary.Entry) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "%s\n\n", word)
+	for index, option := range options {
+		fmt.Fprintf(&text, "%d. %s (%s) — %s\n\n", index+1, option.word, option.partOfSpeech, option.definition.Text)
+	}
+	text.WriteString("Пришли номер значения или /cancel.\n")
+	seen := make(map[string]bool)
+	for _, entry := range entries {
+		source := formatSource(entry.SourceURLs, entry.License)
+		if source != "" && !seen[source] {
+			text.WriteString("\n" + source)
+			seen[source] = true
+		}
+	}
+	return text.String()
+}
+
+func formatSaved(option wordOption, created bool) string {
+	status := "Слово и значение сохранены."
+	if !created {
+		status = "Значение уже есть. Синонимы обновлены."
+	}
+	text := fmt.Sprintf("%s\n\n%s (%s)\n%s", status, option.word, option.partOfSpeech, option.definition.Text)
+	if len(option.definition.Synonyms) > 0 {
+		text += "\n\nСинонимы: " + strings.Join(option.definition.Synonyms, ", ")
+	}
+	if source := formatSource(option.sourceURLs, option.license); source != "" {
+		text += "\n\n" + source
+	}
+	return text
+}
+
+func formatSource(urls []string, license dictionary.License) string {
+	var parts []string
+	for _, url := range urls {
+		if strings.TrimSpace(url) != "" {
+			parts = append(parts, "Источник: "+url)
+		}
+	}
+	if license.Name != "" || license.URL != "" {
+		parts = append(parts, strings.TrimSpace(license.Name+" "+license.URL))
+	}
+	return strings.Join(parts, "\n")
 }

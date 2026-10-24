@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-telegram/bot/models"
-
 	"xrayl/internal/flows"
 	"xrayl/internal/storage"
 )
@@ -37,10 +35,9 @@ func sourceFixture(count int) []storage.Source {
 func TestAddsourceCreatesRetriesAndCancels(t *testing.T) {
 	for _, created := range []bool{true, false} {
 		t.Run(fmt.Sprint(created), func(t *testing.T) {
-			b, sent := telegram(t)
+			b, sent := outputs(t)
 			calls := 0
 			f := flows.NewAddsource(sourceWriterFunc(func(ctx context.Context, user int64, name string) (storage.AddSourceResult, error) {
-				checkReadContext(t, ctx)
 				calls++
 				if user != 42 || name != "Dune" {
 					t.Errorf("save source: %d %q", user, name)
@@ -50,20 +47,19 @@ func TestAddsourceCreatesRetriesAndCancels(t *testing.T) {
 				}
 				return storage.AddSourceResult{Source: storage.Source{ID: 1, Name: "Dune"}, Created: created}, nil
 			}))
-			f.Handle(context.Background(), b, update("/addsource"))
+			handle(f, b, update("/addsource"))
 			for _, text := range []string{"", " ", "/unknown"} {
-				if f.Handle(context.Background(), b, update(text)) {
+				if handle(f, b, update(text)) {
 					t.Fatal("invalid source ended flow")
 				}
 			}
 			if calls != 0 {
 				t.Fatal("invalid input saved source")
 			}
-			if f.Handle(context.Background(), b, update(" Dune ")) {
+			if handle(f, b, update(" Dune ")) {
 				t.Fatal("error ended flow")
 			}
-			sent.failNext()
-			if !f.Handle(context.Background(), b, update("Dune")) || calls != 2 {
+			if !handle(f, b, update("Dune")) || calls != 2 {
 				t.Fatal("source not saved")
 			}
 			last := sent.texts()[len(sent.texts())-1]
@@ -73,24 +69,18 @@ func TestAddsourceCreatesRetriesAndCancels(t *testing.T) {
 		})
 	}
 	f := flows.NewAddsource(nil)
-	for _, u := range []*models.Update{nil, {}, {Message: &models.Message{}}} {
-		if f.Handle(context.Background(), nil, u) {
-			t.Fatal("invalid update ended")
-		}
-	}
-	b, _ := telegram(t)
-	if !f.Handle(context.Background(), b, update("/cancel")) {
+	b, _ := outputs(t)
+	if !handle(f, b, update("/cancel")) {
 		t.Fatal("cancel failed")
 	}
 }
 
 func TestSourcesPagesErrorsAndEmpty(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	all := sourceFixture(21)
 	var offsets []int
 	calls := 0
 	f := flows.NewSources(sourceReaderFunc(func(ctx context.Context, user int64, limit, offset int) ([]storage.Source, error) {
-		checkReadContext(t, ctx)
 		if user != 42 || limit != 21 {
 			t.Error("wrong page query")
 		}
@@ -102,7 +92,7 @@ func TestSourcesPagesErrorsAndEmpty(t *testing.T) {
 		return all[offset:min(offset+limit, len(all))], nil
 	}))
 	for _, text := range []string{"/sources", "/prev", "/next", "/next", "/next", "/prev", "1"} {
-		if f.Handle(context.Background(), b, update(text)) {
+		if handle(f, b, update(text)) {
 			t.Fatal("browsing ended")
 		}
 	}
@@ -112,14 +102,14 @@ func TestSourcesPagesErrorsAndEmpty(t *testing.T) {
 	if first := sent.texts()[0]; !strings.Contains(first, "1. source00") || strings.Contains(first, "source20") || strings.Contains(first, "Пришли номер") {
 		t.Fatalf("list: %s", first)
 	}
-	if !f.Handle(context.Background(), b, update("/cancel")) {
+	if !handle(f, b, update("/cancel")) {
 		t.Fatal("cancel failed")
 	}
 	for _, count := range []int{0, 20} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			b, sent := telegram(t)
+			b, sent := outputs(t)
 			f := flows.NewSources(sourceReaderFunc(func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(count), nil }))
-			if done := f.Handle(context.Background(), b, update("/sources")); done != (count == 0) {
+			if done := handle(f, b, update("/sources")); done != (count == 0) {
 				t.Fatal("empty lifecycle")
 			}
 			if count == 0 && !strings.Contains(sent.texts()[0], "/addsource") {

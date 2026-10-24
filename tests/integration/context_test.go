@@ -12,11 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary/freedictionaryapi"
-	"xrayl/internal/dispatcher"
 	"xrayl/internal/storage/postgres"
 	"xrayl/internal/testutil"
 )
@@ -44,12 +42,9 @@ func TestContextHTTPToPostgres(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
 	}))
 	defer telegramServer.Close()
-	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), postgres.NewStore(db))
-	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(), tg.WithDefaultHandler(d.Handle))
-	if err != nil {
-		t.Fatal(err)
-	}
-	send := func(user int64, text string) string {
+	b, sent := integrationBot(t, freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), postgres.NewStore(db), telegramServer.URL)
+
+	send := func(user int64, text string, replies int) string {
 		t.Helper()
 		mu.Lock()
 		start := len(messages)
@@ -59,24 +54,25 @@ func TestContextHTTPToPostgres(t *testing.T) {
 			message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Length: len(text)}}
 		}
 		b.ProcessUpdate(context.Background(), &models.Update{Message: message})
+		waitReplies(t, sent, replies)
 		mu.Lock()
 		defer mu.Unlock()
 		return strings.Join(messages[start:], "\n")
 	}
-	send(42, "/addsource")
-	if got := send(42, " Dune "); !strings.Contains(got, "Dune") {
+	send(42, "/addsource", 1)
+	if got := send(42, " Dune ", 1); !strings.Contains(got, "Dune") {
 		t.Fatalf("source creation: %s", got)
 	}
-	send(42, "/addsource")
-	if got := send(42, "DUNE"); !strings.Contains(got, "уже есть") {
+	send(42, "/addsource", 1)
+	if got := send(42, "DUNE", 1); !strings.Contains(got, "уже есть") {
 		t.Fatalf("source duplicate: %s", got)
 	}
-	if got := send(42, "/sources"); !strings.Contains(got, "1. Dune") {
+	if got := send(42, "/sources", 1); !strings.Contains(got, "1. Dune") {
 		t.Fatalf("sources list: %s", got)
 	}
-	send(42, "/addword")
-	send(42, "book")
-	if got := send(42, "1"); !strings.Contains(got, "номер источника") {
+	send(42, "/addword", 1)
+	send(42, "book", 1)
+	if got := send(42, "1", 2); !strings.Contains(got, "номер источника") {
 		t.Fatalf("missing source selection: %s", got)
 	}
 	testutil.RequireEntryCounts(t, db, 1, 1, 1)
@@ -84,35 +80,35 @@ func TestContextHTTPToPostgres(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM contexts").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("premature context: %d %v", count, err)
 	}
-	send(42, "1")
-	if got := send(42, "Read the book.\npage 3"); !strings.Contains(got, "Контекст сохранён") {
+	send(42, "1", 1)
+	if got := send(42, "Read the book.\npage 3", 1); !strings.Contains(got, "Контекст сохранён") {
 		t.Fatalf("context confirmation: %s", got)
 	}
-	send(42, "/addword")
-	send(42, "book")
-	send(42, "1")
-	send(42, "/skip")
-	send(42, "/addword")
-	send(42, "book")
-	send(42, "2")
-	send(42, "1")
-	send(42, "Book a room.")
-	send(42, "/addword")
-	send(42, "book")
-	send(42, "1")
-	send(42, "1")
-	if got := send(42, "/cancel"); !strings.Contains(got, "Значение осталось в словаре") {
+	send(42, "/addword", 1)
+	send(42, "book", 1)
+	send(42, "1", 2)
+	send(42, "/skip", 1)
+	send(42, "/addword", 1)
+	send(42, "book", 1)
+	send(42, "2", 2)
+	send(42, "1", 1)
+	send(42, "Book a room.", 1)
+	send(42, "/addword", 1)
+	send(42, "book", 1)
+	send(42, "1", 2)
+	send(42, "1", 1)
+	if got := send(42, "/cancel", 1); !strings.Contains(got, "Значение осталось в словаре") {
 		t.Fatalf("cancel: %s", got)
 	}
-	if got := send(42, "page 4"); got != "" {
+	if got := send(42, "page 4", 0); got != "" {
 		t.Fatalf("canceled session responded: %s", got)
 	}
 	testutil.RequireEntryCounts(t, db, 1, 1, 2)
 	if err := db.QueryRow("SELECT count(*) FROM contexts").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("contexts after cancel/skip: %d %v", count, err)
 	}
-	send(42, "/words")
-	card := send(42, "1")
+	send(42, "/words", 1)
+	card := send(42, "1", 1)
 	for _, text := range []string{"Printed work.", "Read the book.", "page 3", "To reserve.", "Book a room.", "Источник: Dune"} {
 		if !strings.Contains(card, text) {
 			t.Errorf("missing %q in %s", text, card)
@@ -121,18 +117,18 @@ func TestContextHTTPToPostgres(t *testing.T) {
 	if strings.Contains(card, "Not saved.") || strings.Index(card, "Read the book.") > strings.Index(card, "To reserve.") {
 		t.Fatalf("wrong context grouping: %s", card)
 	}
-	if got := send(43, "/sources"); !strings.Contains(got, "Источников пока нет") {
+	if got := send(43, "/sources", 1); !strings.Contains(got, "Источников пока нет") {
 		t.Fatalf("foreign sources: %s", got)
 	}
-	send(43, "/addword")
-	send(43, "book")
-	if got := send(43, "1"); !strings.Contains(got, "/addsource") {
+	send(43, "/addword", 1)
+	send(43, "book", 1)
+	if got := send(43, "1", 2); !strings.Contains(got, "/addsource") {
 		t.Fatalf("no-source finish: %s", got)
 	}
-	if got := send(43, "/words"); !strings.Contains(got, "book") {
+	if got := send(43, "/words", 1); !strings.Contains(got, "book") {
 		t.Fatalf("missing saved word without context: %s", got)
 	}
-	foreignCard := send(43, "1")
+	foreignCard := send(43, "1", 1)
 	if strings.Contains(foreignCard, "Dune") || strings.Contains(foreignCard, "Read the book.") {
 		t.Fatalf("foreign contexts leaked: %s", foreignCard)
 	}

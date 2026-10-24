@@ -19,41 +19,35 @@ type contextStore struct {
 }
 
 func TestAddwordContextSavesImmediately(t *testing.T) {
-	for _, failConfirmation := range []bool{false, true} {
-		b, sent := telegram(t)
-		calls := 0
-		quote := strings.TrimSpace("The book was open.\nChapter 2 · 00:43\n" + strings.Repeat("Подробный контекст 📖 ", 300))
-		f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }), contextStore{
-			saveFunc: func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
-				return storage.AddMeaningResult{MeaningID: 7}, nil
-			},
-			sourceReaderFunc: func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(1), nil },
-			context: func(ctx context.Context, user, meaning, source int64, text string) (int64, error) {
-				checkReadContext(t, ctx)
-				calls++
-				if user != 42 || meaning != 7 || source != 100 || text != quote {
-					t.Errorf("wrong saved context: %d %d %d %q", user, meaning, source, text)
-				}
-				return 1, nil
-			},
-		})
-		for _, text := range []string{"/addword", "book", "1", "1", " ", "/unknown"} {
-			if f.Handle(context.Background(), b, update(text)) {
-				t.Fatalf("premature completion: %s", text)
+	b, sent := outputs(t)
+	calls := 0
+	quote := strings.TrimSpace("The book was open.\nChapter 2 · 00:43\n" + strings.Repeat("Подробный контекст 📖 ", 300))
+	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }), contextStore{
+		saveFunc: func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
+			return storage.AddMeaningResult{MeaningID: 7}, nil
+		},
+		sourceReaderFunc: func(context.Context, int64, int, int) ([]storage.Source, error) { return sourceFixture(1), nil },
+		context: func(ctx context.Context, user, meaning, source int64, text string) (int64, error) {
+			calls++
+			if user != 42 || meaning != 7 || source != 100 || text != quote {
+				t.Errorf("wrong saved context: %d %d %d %q", user, meaning, source, text)
 			}
+			return 1, nil
+		},
+	})
+	for _, text := range []string{"/addword", "book", "1", "1", " ", "/unknown"} {
+		if handle(f, b, update(text)) {
+			t.Fatalf("premature completion: %s", text)
 		}
-		if failConfirmation {
-			sent.failNext()
-		}
-		if !f.Handle(context.Background(), b, update(" "+quote+" ")) || calls != 1 {
-			t.Fatalf("single context input did not save and finish: calls=%d", calls)
-		}
-		if !failConfirmation && !strings.Contains(strings.Join(sent.texts(), ""), quote) {
-			t.Fatal("displayed context truncated")
-		}
-		if strings.Contains(strings.Join(sent.texts(), "\n"), "Укажи страницу") {
-			t.Fatal("separate location prompt remains")
-		}
+	}
+	if !handle(f, b, update(" "+quote+" ")) || calls != 1 {
+		t.Fatalf("single context input did not save and finish: calls=%d", calls)
+	}
+	if !strings.Contains(strings.Join(sent.texts(), ""), quote) {
+		t.Fatal("displayed context truncated")
+	}
+	if strings.Contains(strings.Join(sent.texts(), "\n"), "Укажи страницу") {
+		t.Fatal("separate location prompt remains")
 	}
 }
 
@@ -65,7 +59,7 @@ func (s contextStore) AddContext(ctx context.Context, user, meaning, source int6
 }
 
 func TestAddwordContextSavesAndRetries(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	saves, lists, contexts, lookups := 0, 0, 0, 0
 	all := sourceFixture(21)
 	var saved []string
@@ -75,7 +69,6 @@ func TestAddwordContextSavesAndRetries(t *testing.T) {
 			return storage.AddMeaningResult{WordID: 1, MeaningID: 7, MeaningCreated: true}, nil
 		},
 		sourceReaderFunc: func(ctx context.Context, user int64, limit, offset int) ([]storage.Source, error) {
-			checkReadContext(t, ctx)
 			lists++
 			if lists == 1 || lists == 3 {
 				return nil, errors.New("unavailable")
@@ -86,7 +79,6 @@ func TestAddwordContextSavesAndRetries(t *testing.T) {
 			return all[offset:min(offset+limit, len(all))], nil
 		},
 		context: func(ctx context.Context, user, meaning, source int64, quote string) (int64, error) {
-			checkReadContext(t, ctx)
 			contexts++
 			if user != 42 || meaning != 7 || source != 120 {
 				t.Errorf("wrong context IDs: %d %d %d", user, meaning, source)
@@ -99,12 +91,11 @@ func TestAddwordContextSavesAndRetries(t *testing.T) {
 		},
 	})
 	for _, text := range []string{"/addword", "book", "1", "1", "/next", "/next", "1", " ", "/unknown", " The book was open.\npage 2 "} {
-		if f.Handle(context.Background(), b, update(text)) {
+		if handle(f, b, update(text)) {
 			t.Fatalf("flow completed on %q", text)
 		}
 	}
-	sent.failNext()
-	if !f.Handle(context.Background(), b, update("The book was open.\npage 2")) {
+	if !handle(f, b, update("The book was open.\npage 2")) {
 		t.Fatal("successful context save did not finish")
 	}
 	if saves != 1 || lookups != 1 || lists != 4 || contexts != 2 || !reflect.DeepEqual(saved, []string{"The book was open.\npage 2", "The book was open.\npage 2"}) {
@@ -130,7 +121,7 @@ func TestAddwordContextSkipAndCancel(t *testing.T) {
 		{"cancel quote", []string{"1", "/cancel"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, sent := telegram(t)
+			b, sent := outputs(t)
 			meaningSaves, contextSaves := 0, 0
 			f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }), contextStore{
 				saveFunc: func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
@@ -147,12 +138,12 @@ func TestAddwordContextSkipAndCancel(t *testing.T) {
 				},
 			})
 			for _, text := range []string{"/addword", "book", "1"} {
-				if f.Handle(context.Background(), b, update(text)) {
+				if handle(f, b, update(text)) {
 					t.Fatal("flow ended before context")
 				}
 			}
 			for i, text := range tc.inputs {
-				if got := f.Handle(context.Background(), b, update(text)); got != (i == len(tc.inputs)-1) {
+				if got := handle(f, b, update(text)); got != (i == len(tc.inputs)-1) {
 					t.Fatalf("unexpected completion on %s", text)
 				}
 			}
@@ -166,8 +157,8 @@ func TestAddwordContextSkipAndCancel(t *testing.T) {
 	}
 }
 
-func TestAddwordContextSendFailureKeepsSelectedSource(t *testing.T) {
-	b, sent := telegram(t)
+func TestAddwordContextKeepsSelectedSource(t *testing.T) {
+	b, _ := outputs(t)
 	contexts := 0
 	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }), contextStore{
 		saveFunc: func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
@@ -182,14 +173,11 @@ func TestAddwordContextSendFailureKeepsSelectedSource(t *testing.T) {
 			return 1, nil
 		},
 	})
-	f.Handle(context.Background(), b, update("/addword"))
-	f.Handle(context.Background(), b, update("book"))
-	sent.failNext()
-	f.Handle(context.Background(), b, update("1"))
-	sent.failNext()
-	f.Handle(context.Background(), b, update("1"))
-	sent.failNext()
-	if !f.Handle(context.Background(), b, update("Quote.")) || contexts != 1 {
+	handle(f, b, update("/addword"))
+	handle(f, b, update("book"))
+	handle(f, b, update("1"))
+	handle(f, b, update("1"))
+	if !handle(f, b, update("Quote.")) || contexts != 1 {
 		t.Fatal("failed send lost context draft")
 	}
 }

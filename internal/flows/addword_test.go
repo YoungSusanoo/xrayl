@@ -4,18 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
-	"time"
-	"unicode/utf16"
-
-	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary"
 	"xrayl/internal/flows"
@@ -41,54 +32,24 @@ func (f saveFunc) AddMeaning(ctx context.Context, userID int64, word, definition
 	return f(ctx, userID, word, definition, synonyms)
 }
 
-type telegramLog struct {
-	mu       sync.Mutex
-	messages []string
-	failAt   int
-}
+type flowLog struct{ messages []string }
 
-func telegram(t *testing.T) (*tg.Bot, *telegramLog) {
+func outputs(t *testing.T) (*flowLog, *flowLog) {
 	t.Helper()
-	record := &telegramLog{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			t.Errorf("parse Telegram request: %v", err)
-		}
-		if r.MultipartForm != nil {
-			defer r.MultipartForm.RemoveAll()
-		}
-		record.mu.Lock()
-		record.messages = append(record.messages, r.FormValue("text"))
-		failed := record.failAt == len(record.messages)
-		record.mu.Unlock()
-		if failed {
-			io.WriteString(w, `{"ok":false,"error_code":500,"description":"test failure"}`)
-			return
-		}
-		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
-	}))
-	t.Cleanup(server.Close)
-	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(server.URL))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b, record
+	log := &flowLog{}
+	return log, log
 }
 
-func (r *telegramLog) texts() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.messages...)
+func (r *flowLog) texts() []string { return r.messages }
+
+func update(text string) flows.Message {
+	return flows.Message{ChatID: 10, UserID: 42, Text: text}
 }
 
-func (r *telegramLog) failNext() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.failAt = len(r.messages) + 1
-}
-
-func update(text string) *models.Update {
-	return &models.Update{Message: &models.Message{Chat: models.Chat{ID: 10}, From: &models.User{ID: 42}, Text: text}}
+func handle(f flows.Flow, log *flowLog, message flows.Message) bool {
+	result := f.Handle(context.Background(), message)
+	log.messages = append(log.messages, result.Texts...)
+	return result.Done
 }
 
 func entries() []dictionary.Entry {
@@ -106,7 +67,7 @@ func entries() []dictionary.Entry {
 }
 
 func TestAddwordSelectsAndSavesChosenDefinition(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	lookups, saves := 0, 0
 	f := flows.NewAddword(lookupFunc(func(ctx context.Context, word string) ([]dictionary.Entry, error) {
 		lookups++
@@ -119,13 +80,9 @@ func TestAddwordSelectsAndSavesChosenDefinition(t *testing.T) {
 		if userID != 42 || word != "bake" || definition != "To cook in an oven." || !reflect.DeepEqual(synonyms, []string{"cook"}) {
 			t.Errorf("wrong saved selection: %d %q %q %v", userID, word, definition, synonyms)
 		}
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 5*time.Second {
-			t.Error("save must have a five-second deadline")
-		}
 		return storage.AddMeaningResult{WordID: 1, MeaningID: 2, MeaningCreated: true}, nil
 	}))
-	if f.Handle(context.Background(), b, update("/addword")) || f.Handle(context.Background(), b, update(" book ")) {
+	if handle(f, b, update("/addword")) || handle(f, b, update(" book ")) {
 		t.Fatal("flow completed before selection")
 	}
 	list := strings.Join(sent.texts(), "\n")
@@ -134,7 +91,7 @@ func TestAddwordSelectsAndSavesChosenDefinition(t *testing.T) {
 			t.Errorf("missing %q in choices: %s", text, list)
 		}
 	}
-	if saves != 0 || !f.Handle(context.Background(), b, update("4")) || saves != 1 || lookups != 1 {
+	if saves != 0 || !handle(f, b, update("4")) || saves != 1 || lookups != 1 {
 		t.Fatalf("wrong lifecycle: lookups=%d saves=%d", lookups, saves)
 	}
 	confirmation := strings.Join(sent.texts()[2:], "\n")
@@ -146,7 +103,7 @@ func TestAddwordSelectsAndSavesChosenDefinition(t *testing.T) {
 }
 
 func TestAddwordInvalidInputDoesNotAdvanceOrSave(t *testing.T) {
-	b, _ := telegram(t)
+	b, _ := outputs(t)
 	lookups, saves := 0, 0
 	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) {
 		lookups++
@@ -158,22 +115,22 @@ func TestAddwordInvalidInputDoesNotAdvanceOrSave(t *testing.T) {
 		}
 		return storage.AddMeaningResult{MeaningCreated: true}, nil
 	}))
-	f.Handle(context.Background(), b, update("/addword"))
+	handle(f, b, update("/addword"))
 	for _, text := range []string{"", "  ", "/unknown"} {
-		if f.Handle(context.Background(), b, update(text)) {
+		if handle(f, b, update(text)) {
 			t.Fatal("invalid word completed flow")
 		}
 	}
 	if lookups != 0 {
 		t.Fatal("invalid input reached dictionary")
 	}
-	f.Handle(context.Background(), b, update("book"))
+	handle(f, b, update("book"))
 	for _, text := range []string{"", "0", "-1", "5", "1.5", "text", "/unknown"} {
-		if f.Handle(context.Background(), b, update(text)) {
+		if handle(f, b, update(text)) {
 			t.Fatal("invalid selection completed flow")
 		}
 	}
-	if lookups != 1 || saves != 0 || !f.Handle(context.Background(), b, update("2")) || saves != 1 {
+	if lookups != 1 || saves != 0 || !handle(f, b, update("2")) || saves != 1 {
 		t.Fatalf("invalid input changed state: lookups=%d saves=%d", lookups, saves)
 	}
 }
@@ -187,7 +144,7 @@ func TestAddwordDictionaryErrorsAllowNewWord(t *testing.T) {
 		{"unavailable", errors.New("network unavailable")}, {"invalid response", dictionary.ErrInvalidResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, _ := telegram(t)
+			b, _ := outputs(t)
 			lookups := 0
 			f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) {
 				lookups++
@@ -196,8 +153,8 @@ func TestAddwordDictionaryErrorsAllowNewWord(t *testing.T) {
 				}
 				return entries(), nil
 			}), nil)
-			f.Handle(context.Background(), b, update("/addword"))
-			if f.Handle(context.Background(), b, update("missing")) || f.Handle(context.Background(), b, update("book")) || lookups != 2 {
+			handle(f, b, update("/addword"))
+			if handle(f, b, update("missing")) || handle(f, b, update("book")) || lookups != 2 {
 				t.Fatalf("failed lookup advanced state: %d calls", lookups)
 			}
 		})
@@ -205,7 +162,7 @@ func TestAddwordDictionaryErrorsAllowNewWord(t *testing.T) {
 }
 
 func TestAddwordSaveFailureRetriesWithoutLookup(t *testing.T) {
-	b, sent := telegram(t)
+	b, sent := outputs(t)
 	lookups, saves := 0, 0
 	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { lookups++; return entries(), nil }),
 		saveFunc(func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
@@ -215,9 +172,9 @@ func TestAddwordSaveFailureRetriesWithoutLookup(t *testing.T) {
 			}
 			return storage.AddMeaningResult{MeaningID: 1, MeaningCreated: false}, nil
 		}))
-	f.Handle(context.Background(), b, update("/addword"))
-	f.Handle(context.Background(), b, update("book"))
-	if f.Handle(context.Background(), b, update("1")) || !f.Handle(context.Background(), b, update("1")) || saves != 2 || lookups != 1 {
+	handle(f, b, update("/addword"))
+	handle(f, b, update("book"))
+	if handle(f, b, update("1")) || !handle(f, b, update("1")) || saves != 2 || lookups != 1 {
 		t.Fatalf("retry state: lookups=%d saves=%d", lookups, saves)
 	}
 	if !strings.Contains(strings.Join(sent.texts(), "\n"), "обновлены") {
@@ -228,34 +185,25 @@ func TestAddwordSaveFailureRetriesWithoutLookup(t *testing.T) {
 func TestAddwordCancelDoesNotSave(t *testing.T) {
 	for _, selectState := range []bool{false, true} {
 		t.Run(fmt.Sprint(selectState), func(t *testing.T) {
-			b, _ := telegram(t)
+			b, _ := outputs(t)
 			f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }),
 				saveFunc(func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
 					t.Error("cancel saved data")
 					return storage.AddMeaningResult{}, nil
 				}))
-			f.Handle(context.Background(), b, update("/addword"))
+			handle(f, b, update("/addword"))
 			if selectState {
-				f.Handle(context.Background(), b, update("book"))
+				handle(f, b, update("book"))
 			}
-			if !f.Handle(context.Background(), b, update("/cancel")) {
+			if !handle(f, b, update("/cancel")) {
 				t.Fatal("cancel did not complete flow")
 			}
 		})
 	}
 }
 
-func TestAddwordIgnoresInvalidUpdates(t *testing.T) {
-	f := flows.NewAddword(nil, nil)
-	for _, input := range []*models.Update{nil, {}, {Message: &models.Message{}}} {
-		if f.Handle(context.Background(), nil, input) {
-			t.Fatal("invalid update completed flow")
-		}
-	}
-}
-
-func TestAddwordSplitsLongOutputWithoutTruncatingSavedDefinition(t *testing.T) {
-	b, sent := telegram(t)
+func TestAddwordPreservesLongDefinition(t *testing.T) {
+	b, sent := outputs(t)
 	definition := strings.Repeat("long definition 📖 ", 600)
 	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) {
 		return []dictionary.Entry{{Word: "book", Meanings: []dictionary.Meaning{{PartOfSpeech: "noun", Definitions: []dictionary.Definition{{Text: definition}}}}}}, nil
@@ -265,59 +213,29 @@ func TestAddwordSplitsLongOutputWithoutTruncatingSavedDefinition(t *testing.T) {
 		}
 		return storage.AddMeaningResult{MeaningCreated: true}, nil
 	}))
-	f.Handle(context.Background(), b, update("/addword"))
-	f.Handle(context.Background(), b, update("book"))
+	handle(f, b, update("/addword"))
+	handle(f, b, update("book"))
 	if !strings.Contains(strings.Join(sent.texts(), ""), definition) {
 		t.Fatal("displayed definition was truncated")
 	}
-	if !f.Handle(context.Background(), b, update("1")) {
+	if !handle(f, b, update("1")) {
 		t.Fatal("long definition not saved")
-	}
-	for _, text := range sent.texts() {
-		if len(utf16.Encode([]rune(text))) > 3000 {
-			t.Fatalf("message too long: %d runes", len([]rune(text)))
-		}
 	}
 }
 
-func TestAddwordTelegramFailuresPreserveLifecycle(t *testing.T) {
-	t.Run("initial prompt", func(t *testing.T) {
-		b, sent := telegram(t)
-		sent.failNext()
-		lookups := 0
-		f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { lookups++; return entries(), nil }), nil)
-		f.Handle(context.Background(), b, update("/addword"))
-		f.Handle(context.Background(), b, update("/addword"))
-		f.Handle(context.Background(), b, update("book"))
-		if lookups != 1 {
-			t.Fatalf("prompt failure advanced state: %d lookups", lookups)
-		}
-	})
-	t.Run("choices", func(t *testing.T) {
-		b, sent := telegram(t)
-		lookups := 0
-		f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { lookups++; return entries(), nil }), nil)
-		f.Handle(context.Background(), b, update("/addword"))
-		sent.failNext()
-		f.Handle(context.Background(), b, update("book"))
-		f.Handle(context.Background(), b, update("book"))
-		if lookups != 2 {
-			t.Fatalf("choices failure advanced state: %d lookups", lookups)
-		}
-	})
-	t.Run("confirmation", func(t *testing.T) {
-		b, sent := telegram(t)
-		saves := 0
-		f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) { return entries(), nil }),
-			saveFunc(func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
-				saves++
-				return storage.AddMeaningResult{MeaningCreated: true}, nil
-			}))
-		f.Handle(context.Background(), b, update("/addword"))
-		f.Handle(context.Background(), b, update("book"))
-		sent.failNext()
-		if !f.Handle(context.Background(), b, update("1")) || saves != 1 {
-			t.Fatal("confirmation failure did not finish saved flow")
-		}
-	})
+func TestAddwordCanAdvanceWithoutDeliveringOutput(t *testing.T) {
+	lookups, saves := 0, 0
+	f := flows.NewAddword(lookupFunc(func(context.Context, string) ([]dictionary.Entry, error) {
+		lookups++
+		return entries(), nil
+	}), saveFunc(func(context.Context, int64, string, string, []string) (storage.AddMeaningResult, error) {
+		saves++
+		return storage.AddMeaningResult{MeaningID: 1, MeaningCreated: true}, nil
+	}))
+	f.Handle(context.Background(), update("/addword"))
+	f.Handle(context.Background(), update("book"))
+	result := f.Handle(context.Background(), update("1"))
+	if !result.Done || lookups != 1 || saves != 1 || len(result.Texts) == 0 {
+		t.Fatalf("state depends on output delivery: %+v lookups=%d saves=%d", result, lookups, saves)
+	}
 }

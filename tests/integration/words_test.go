@@ -12,11 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary/freedictionaryapi"
-	"xrayl/internal/dispatcher"
 	"xrayl/internal/storage/postgres"
 	"xrayl/internal/testutil"
 )
@@ -49,13 +47,9 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 	}))
 	defer telegramServer.Close()
 	store := postgres.NewStore(db)
-	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), store)
-	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
-		tg.WithDefaultHandler(d.Handle))
-	if err != nil {
-		t.Fatal(err)
-	}
-	send := func(user int64, text string) string {
+	b, sent := integrationBot(t, freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), store, telegramServer.URL)
+
+	send := func(user int64, text string, replies int) string {
 		t.Helper()
 		mu.Lock()
 		start := len(messages)
@@ -65,14 +59,15 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 			message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Length: len(text)}}
 		}
 		b.ProcessUpdate(ctx, &models.Update{Message: message})
+		waitReplies(t, sent, replies)
 		mu.Lock()
 		defer mu.Unlock()
 		return strings.Join(messages[start:], "\n")
 	}
 	for _, number := range []string{"1", "2"} {
-		send(42, "/addword")
-		send(42, "book")
-		send(42, number)
+		send(42, "/addword", 1)
+		send(42, "book", 1)
+		send(42, number, 2)
 	}
 	for _, item := range []struct {
 		user             int64
@@ -82,36 +77,36 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	list := send(42, "/words")
+	list := send(42, "/words", 1)
 	if strings.Count(list, "book") != 1 || !strings.Contains(list, "1. apple\n2. book") || strings.Contains(list, "hidden") || strings.Contains(list, "Printed work.") {
 		t.Fatalf("word list: %s", list)
 	}
-	card := send(42, "2")
+	card := send(42, "2", 1)
 	for _, want := range []string{"book", "Printed work.", "To reserve.", "volume, tome", "hold"} {
 		if !strings.Contains(card, want) {
 			t.Errorf("missing %q in %s", want, card)
 		}
 	}
-	if got := send(42, "1"); !strings.Contains(got, "A fruit.") {
+	if got := send(42, "1", 1); !strings.Contains(got, "A fruit.") {
 		t.Fatalf("browsing ended after first selection: %s", got)
 	}
-	if got := send(43, "/words"); strings.Contains(got, "book") || !strings.Contains(got, "hidden") {
+	if got := send(43, "/words", 1); strings.Contains(got, "book") || !strings.Contains(got, "hidden") {
 		t.Fatalf("foreign list: %s", got)
 	}
-	if got := send(44, "/words"); !strings.Contains(got, "/addword") {
+	if got := send(44, "/words", 1); !strings.Contains(got, "/addword") {
 		t.Fatalf("empty list: %s", got)
 	}
-	send(42, "/cancel")
-	if got := send(42, "1"); got != "" {
+	send(42, "/cancel", 1)
+	if got := send(42, "1", 0); got != "" {
 		t.Fatalf("canceled session answered: %s", got)
 	}
-	send(42, "/words")
-	send(42, "/addword")
-	if got := send(42, "book"); !strings.Contains(got, "Пришли номер значения") {
+	send(42, "/words", 1)
+	send(42, "/addword", 1)
+	if got := send(42, "book", 1); !strings.Contains(got, "Пришли номер значения") {
 		t.Fatalf("addword did not replace browsing: %s", got)
 	}
-	send(42, "/words")
-	if got := send(42, "2"); !strings.Contains(got, "To reserve.") {
+	send(42, "/words", 1)
+	if got := send(42, "2", 1); !strings.Contains(got, "To reserve.") {
 		t.Fatalf("words did not replace adding: %s", got)
 	}
 	if lookups.Load() != 3 {

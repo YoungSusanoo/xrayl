@@ -13,11 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/dictionary/freedictionaryapi"
-	"xrayl/internal/dispatcher"
 	"xrayl/internal/storage/postgres"
 	"xrayl/internal/testutil"
 )
@@ -55,51 +53,49 @@ func TestAddwordHTTPToPostgres(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
 	}))
 	defer telegramServer.Close()
-	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL+"/api/v1", dictionaryServer.Client()), postgres.NewStore(db))
-	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
-		tg.WithDefaultHandler(d.Handle))
-	if err != nil {
-		t.Fatal(err)
-	}
-	send := func(user int64, text string) {
+	b, sent := integrationBot(t, freedictionaryapi.NewClient(dictionaryServer.URL+"/api/v1", dictionaryServer.Client()), postgres.NewStore(db), telegramServer.URL)
+
+	send := func(user int64, text string, replies int) {
 		t.Helper()
 		message := &models.Message{Chat: models.Chat{ID: 10}, From: &models.User{ID: user}, Text: text}
 		if text == "/addword" {
 			message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 8}}
 		}
 		b.ProcessUpdate(context.Background(), &models.Update{Message: message})
+		waitReplies(t, sent, replies)
 	}
-	send(42, "/addword")
-	send(42, "book")
-	send(42, "99")
+	send(42, "/addword", 0)
+	send(42, "book", 0)
+	send(42, "99", 0)
+	waitReplies(t, sent, 3)
 	testutil.RequireEntryCounts(t, db, 0, 0, 0)
-	send(42, "1")
+	send(42, "1", 2)
 	var meaningID int64
 	if err := db.QueryRow("SELECT id FROM meanings WHERE user_id=42").Scan(&meaningID); err != nil {
 		t.Fatal(err)
 	}
 	testutil.RequireSynonyms(t, db, meaningID, `["Volume","Tome"]`)
-	send(42, "1")
+	send(42, "1", 0)
 	testutil.RequireEntryCounts(t, db, 1, 1, 1)
 	for _, want := range []string{`["publication"]`, `[]`} {
-		send(42, "/addword")
-		send(42, "book")
-		send(42, "1")
+		send(42, "/addword", 1)
+		send(42, "book", 1)
+		send(42, "1", 2)
 		testutil.RequireSynonyms(t, db, meaningID, want)
 		testutil.RequireEntryCounts(t, db, 1, 1, 1)
 	}
-	send(43, "/addword")
-	send(43, "book")
-	send(43, "2")
+	send(43, "/addword", 1)
+	send(43, "book", 1)
+	send(43, "2", 2)
 	testutil.RequireEntryCounts(t, db, 2, 2, 2)
 	var definition string
 	if err := db.QueryRow("SELECT definition FROM meanings WHERE user_id=43").Scan(&definition); err != nil || definition != "An account record." {
 		t.Fatalf("wrong selection saved: %q, %v", definition, err)
 	}
-	send(44, "/addword")
-	send(44, "book")
-	send(44, "/cancel")
-	send(44, "1")
+	send(44, "/addword", 1)
+	send(44, "book", 1)
+	send(44, "/cancel", 1)
+	send(44, "1", 0)
 	testutil.RequireEntryCounts(t, db, 2, 2, 2)
 	if lookups.Load() != 5 {
 		t.Fatalf("selection triggered extra lookups: %d", lookups.Load())

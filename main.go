@@ -21,6 +21,7 @@ import (
 	"xrayl/internal/dictionary/freedictionaryapi"
 	"xrayl/internal/dispatcher"
 	"xrayl/internal/storage/postgres"
+	"xrayl/internal/telegram"
 )
 
 func main() {
@@ -52,14 +53,15 @@ func run(ctx context.Context) error {
 	defer db.Close()
 
 	dictionary := freedictionaryapi.NewClient(freedictionaryapi.BaseURL, &http.Client{})
-	d := dispatcher.New(dictionary, postgres.NewStore(db))
-	bot, err := tg.New(token,
-		tg.WithDefaultHandler(d.Handle),
-	)
+	sender := &telegram.Sender{}
+	d := dispatcher.New(ctx, dictionary, postgres.NewStore(db), sender)
+	defer d.Close()
+	bot, err := tg.New(token, telegram.Options(d)...)
 	if err != nil {
 		return fmt.Errorf("create Telegram bot: %w", err)
 	}
 
+	sender.Bot = bot
 	bot.Start(ctx)
 	return nil
 }

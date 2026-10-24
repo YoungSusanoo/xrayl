@@ -8,9 +8,6 @@ import (
 	"strings"
 	"time"
 
-	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-
 	"xrayl/internal/storage"
 )
 
@@ -23,97 +20,81 @@ const (
 )
 
 type Words struct {
-	state    wordsState
-	handlers map[wordsState]func(context.Context, *tg.Bot, *models.Update) bool
-	store    WordViewStore
-	words    []storage.Word
-	offset   int
-	hasNext  bool
+	state   wordsState
+	store   WordViewStore
+	words   []storage.Word
+	offset  int
+	hasNext bool
 }
 
 func NewWords(store WordViewStore) *Words {
-	flow := &Words{store: store}
-	flow.handlers = map[wordsState]func(context.Context, *tg.Bot, *models.Update) bool{
-		wordsInitial:   flow.handleInitial,
-		wordsSelecting: flow.handleSelection,
-	}
-	return flow
+	return &Words{store: store}
 }
 
-func (flow *Words) Handle(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	if update == nil || update.Message == nil || update.Message.From == nil {
-		return false
+func (flow *Words) Handle(ctx context.Context, message Message) Result {
+	if strings.TrimSpace(message.Text) == "/cancel" {
+		return Result{Texts: []string{"Просмотр завершён."}, Done: true}
 	}
-	if strings.TrimSpace(update.Message.Text) == "/cancel" {
-		sendText(ctx, bot, update.Message.Chat.ID, "Просмотр завершён.")
-		return true
+	switch flow.state {
+	case wordsInitial:
+		return flow.handleInitial(ctx, message)
+	case wordsSelecting:
+		return flow.handleSelection(ctx, message)
+	default:
+		panic("invalid words state")
 	}
-	return flow.handlers[flow.state](ctx, bot, update)
 }
 
-func (flow *Words) handleInitial(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	return flow.showPage(ctx, bot, update, 0)
+func (flow *Words) handleInitial(ctx context.Context, message Message) Result {
+	return flow.showPage(ctx, message, 0)
 }
 
-func (flow *Words) handleSelection(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	text := strings.TrimSpace(update.Message.Text)
-	chatID := update.Message.Chat.ID
+func (flow *Words) handleSelection(ctx context.Context, message Message) Result {
+	text := strings.TrimSpace(message.Text)
 	switch text {
 	case "/next":
 		if !flow.hasNext {
-			sendText(ctx, bot, chatID, "Это последняя страница.")
-			return false
+			return Result{Texts: []string{"Это последняя страница."}}
 		}
-		return flow.showPage(ctx, bot, update, flow.offset+wordsPageSize)
+		return flow.showPage(ctx, message, flow.offset+wordsPageSize)
 	case "/prev":
 		if flow.offset == 0 {
-			sendText(ctx, bot, chatID, "Это первая страница.")
-			return false
+			return Result{Texts: []string{"Это первая страница."}}
 		}
-		return flow.showPage(ctx, bot, update, flow.offset-wordsPageSize)
+		return flow.showPage(ctx, message, flow.offset-wordsPageSize)
 	}
 	number, err := strconv.Atoi(text)
 	if err != nil || number < 1 || number > len(flow.words) {
-		sendText(ctx, bot, chatID, fmt.Sprintf("Пришли номер от 1 до %d, /next, /prev или /cancel.", len(flow.words)))
-		return false
+		return Result{Texts: []string{fmt.Sprintf("Пришли номер от 1 до %d, /next, /prev или /cancel.", len(flow.words))}}
 	}
 	word := flow.words[number-1]
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	meanings, err := flow.store.ListMeanings(readCtx, update.Message.From.ID, word.ID)
+	meanings, err := flow.store.ListMeanings(readCtx, message.UserID, word.ID)
 	if err != nil {
 		cancel()
-		log.Printf("load word meanings failed for user %d: %v", update.Message.From.ID, err)
-		sendText(ctx, bot, chatID, "Не удалось загрузить значения. Повтори номер или /cancel.")
-		return false
+		log.Printf("load word meanings failed for user %d: %v", message.UserID, err)
+		return Result{Texts: []string{"Не удалось загрузить значения. Повтори номер или /cancel."}}
 	}
-	contexts, err := flow.store.ListWordContexts(readCtx, update.Message.From.ID, word.ID)
+	contexts, err := flow.store.ListWordContexts(readCtx, message.UserID, word.ID)
 	cancel()
 	if err != nil {
 		log.Printf("load word contexts failed: %v", err)
-		sendText(ctx, bot, chatID, "Не удалось загрузить контексты. Повтори номер или /cancel.")
-		return false
+		return Result{Texts: []string{"Не удалось загрузить контексты. Повтори номер или /cancel."}}
 	}
-	sendText(ctx, bot, chatID, formatWordMeanings(word, meanings, contexts))
-	return false
+	return Result{Texts: []string{formatWordMeanings(word, meanings, contexts)}}
 }
 
-func (flow *Words) showPage(ctx context.Context, bot *tg.Bot, update *models.Update, offset int) bool {
-	chatID := update.Message.Chat.ID
-	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	words, err := flow.store.ListWords(readCtx, update.Message.From.ID, wordsPageSize+1, offset)
-	cancel()
+func (flow *Words) showPage(ctx context.Context, message Message, offset int) Result {
+	words, err := flow.store.ListWords(ctx, message.UserID, wordsPageSize+1, offset)
 	if err != nil {
-		log.Printf("load words failed for user %d: %v", update.Message.From.ID, err)
-		sendText(ctx, bot, chatID, "Не удалось загрузить список. Повтори команду или /words, чтобы начать заново.")
-		return false
+		log.Printf("load words failed for user %d: %v", message.UserID, err)
+		return Result{Texts: []string{"Не удалось загрузить список. Повтори команду или /words, чтобы начать заново."}}
 	}
 	if len(words) == 0 {
 		if offset == 0 {
-			sendText(ctx, bot, chatID, "В словаре пока нет слов. Добавь первое через /addword.")
-			return true
+			return Result{Texts: []string{"В словаре пока нет слов. Добавь первое через /addword."}, Done: true}
 		}
-		sendText(ctx, bot, chatID, "На этой странице нет слов. Открой список заново через /words.")
-		return false
+		return Result{Texts: []string{"На этой странице нет слов. Открой список заново через /words."}}
 	}
 	flow.hasNext = len(words) > wordsPageSize
 	if flow.hasNext {
@@ -122,6 +103,5 @@ func (flow *Words) showPage(ctx context.Context, bot *tg.Bot, update *models.Upd
 	flow.words = words
 	flow.offset = offset
 	flow.state = wordsSelecting
-	sendText(ctx, bot, chatID, formatWordsPage(words, offset/wordsPageSize+1, offset > 0, flow.hasNext))
-	return false
+	return Result{Texts: []string{formatWordsPage(words, offset/wordsPageSize+1, offset > 0, flow.hasNext)}}
 }

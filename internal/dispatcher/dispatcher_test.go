@@ -2,266 +2,289 @@ package dispatcher
 
 import (
 	"context"
-	"io"
-	"net/http"
+	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-
-	"xrayl/internal/dictionary"
 	"xrayl/internal/flows"
-	"xrayl/internal/storage"
 )
 
-type testFlow struct {
-	calls int
-	done  bool
+type flowFunc func(context.Context, flows.Message) flows.Result
+
+func (f flowFunc) Handle(ctx context.Context, message flows.Message) flows.Result {
+	return f(ctx, message)
 }
 
-func (f *testFlow) Handle(context.Context, *bot.Bot, *models.Update) bool {
-	f.calls++
-	return f.done
+type senderFunc func(context.Context, int64, string) error
+
+func (f senderFunc) SendText(ctx context.Context, chat int64, text string) error {
+	return f(ctx, chat, text)
 }
 
-func TestHandleRoutesAndClearsCompletedFlow(t *testing.T) {
-	d := New(nil, nil)
-	firstKey := sessionKey{chatID: 10, userID: 1}
-	secondKey := sessionKey{chatID: 10, userID: 2}
-	first := &testFlow{}
-	second := &testFlow{}
-	d.sessions[firstKey] = first
-	d.sessions[secondKey] = second
-
-	firstUpdate := &models.Update{Message: &models.Message{
-		Chat: models.Chat{ID: 10}, From: &models.User{ID: 1},
-	}}
-	d.Handle(context.Background(), nil, firstUpdate)
-	if first.calls != 1 || second.calls != 0 {
-		t.Fatalf("wrong flow handled update: first=%d second=%d", first.calls, second.calls)
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for worker")
+		var zero T
+		return zero
 	}
-	if d.sessions[firstKey] != first {
-		t.Fatal("unfinished flow was removed")
-	}
-
-	first.done = true
-	d.Handle(context.Background(), nil, firstUpdate)
-	if _, ok := d.sessions[firstKey]; ok {
-		t.Fatal("completed flow was not removed")
-	}
-	if d.sessions[secondKey] != second {
-		t.Fatal("another user's flow was changed")
-	}
-
-	d.Handle(context.Background(), nil, nil)
-	d.Handle(context.Background(), nil, &models.Update{})
 }
 
-type testDictionary struct{}
-
-func (testDictionary) Lookup(context.Context, string) ([]dictionary.Entry, error) {
-	return []dictionary.Entry{{Word: "book", Meanings: []dictionary.Meaning{{PartOfSpeech: "noun", Definitions: []dictionary.Definition{{Text: "A written work."}}}}}}, nil
+func message(user int64, text string) flows.Message {
+	return flows.Message{ChatID: 10, UserID: user, Text: text, Command: strings.TrimPrefix(text, "/")}
 }
 
-type testStore struct{ users []int64 }
-
-func (s *testStore) AddSource(context.Context, int64, string) (storage.AddSourceResult, error) {
-	return storage.AddSourceResult{}, nil
-}
-func (s *testStore) ListSources(context.Context, int64, int, int) ([]storage.Source, error) {
-	return nil, nil
-}
-func (s *testStore) AddContext(context.Context, int64, int64, int64, string) (int64, error) {
-	return 0, nil
-}
-func (s *testStore) ListWordContexts(context.Context, int64, int64) ([]storage.WordContext, error) {
-	return nil, nil
+func testDispatcher(t *testing.T, factory func() flows.Flow, sender Sender) *Dispatcher {
+	t.Helper()
+	d := New(context.Background(), nil, nil, sender)
+	d.factories = map[string]func() flows.Flow{"start": factory}
+	t.Cleanup(d.Close)
+	return d
 }
 
-func (s *testStore) ListWords(context.Context, int64, int, int) ([]storage.Word, error) {
-	return []storage.Word{{ID: 1, Text: "book"}}, nil
-}
-
-func (s *testStore) ListMeanings(context.Context, int64, int64) ([]storage.Meaning, error) {
-	return []storage.Meaning{{ID: 1, Definition: "A written work."}}, nil
-}
-
-func (s *testStore) AddMeaning(_ context.Context, user int64, _, _ string, _ []string) (storage.AddMeaningResult, error) {
-	s.users = append(s.users, user)
-	return storage.AddMeaningResult{MeaningCreated: true}, nil
-}
-
-type telegramTransport struct{}
-
-func (telegramTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`))}, nil
-}
-
-func TestAddwordRestartCancelAndSessionIsolation(t *testing.T) {
-	store := &testStore{}
-	d := New(testDictionary{}, store)
-	b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
-	if err != nil {
+func enqueue(t *testing.T, d *Dispatcher, m flows.Message) {
+	t.Helper()
+	if err := d.Enqueue(m); err != nil {
 		t.Fatal(err)
 	}
-	message := func(user int64, text string) *models.Update {
-		return commandUpdate(user, 10, text)
-	}
-	ctx := context.Background()
-	d.Handle(ctx, b, message(1, "/addword"))
-	d.Handle(ctx, b, message(1, "book"))
-	d.Handle(ctx, b, message(2, "/addword"))
-	d.Handle(ctx, b, message(2, "book"))
-	d.Handle(ctx, b, message(1, "/addword"))
-	d.Handle(ctx, b, message(1, "/cancel"))
-	if len(d.sessions) != 1 || d.sessions[sessionKey{chatID: 10, userID: 2}] == nil {
-		t.Fatal("restart/cancel changed another user's session")
-	}
-	d.Handle(ctx, b, message(1, "1"))
-	d.Handle(ctx, b, message(2, "1"))
-	d.Handle(ctx, b, message(2, "1"))
-	if len(d.sessions) != 0 || len(store.users) != 1 || store.users[0] != 2 {
-		t.Fatalf("wrong saves: %v; sessions=%d", store.users, len(d.sessions))
-	}
 }
 
-func TestWordsRestartAndSwitchFlows(t *testing.T) {
-	store := &testStore{}
-	d := New(testDictionary{}, store)
-	b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := func(user, chat int64, text string) *models.Update {
-		return commandUpdate(user, chat, text)
-	}
-	ctx := context.Background()
-	d.Handle(ctx, b, message(1, 10, "/words"))
-	first := d.sessions[sessionKey{chatID: 10, userID: 1}]
-	if _, ok := first.(*flows.Words); !ok {
-		t.Fatal("words flow was not started")
-	}
-	d.Handle(ctx, b, message(1, 10, "1"))
-	if d.sessions[sessionKey{chatID: 10, userID: 1}] != first {
-		t.Fatal("selection ended browsing")
-	}
-	d.Handle(ctx, b, message(2, 10, "/words"))
-	d.Handle(ctx, b, message(1, 20, "/words"))
-	d.Handle(ctx, b, message(1, 10, "/words"))
-	if d.sessions[sessionKey{chatID: 10, userID: 1}] == first {
-		t.Fatal("words did not restart")
-	}
-	d.Handle(ctx, b, message(1, 10, "/addword"))
-	if _, ok := d.sessions[sessionKey{chatID: 10, userID: 1}].(*flows.Addword); !ok {
-		t.Fatal("addword did not replace browsing")
-	}
-	d.Handle(ctx, b, message(1, 10, "book"))
-	d.Handle(ctx, b, message(1, 10, "/words"))
-	d.Handle(ctx, b, message(1, 10, "1"))
-	if len(store.users) != 0 {
-		t.Fatal("selection reached old addword flow")
-	}
-	d.Handle(ctx, b, message(1, 10, "/cancel"))
-	if len(d.sessions) != 2 {
-		t.Fatal("cancel affected other user/chat")
-	}
-	d.Handle(ctx, b, nil)
-	d.Handle(ctx, b, &models.Update{})
-}
-
-func commandUpdate(user, chat int64, text string) *models.Update {
-	message := &models.Message{Chat: models.Chat{ID: chat}, From: &models.User{ID: user}, Text: text}
-	if strings.HasPrefix(text, "/") {
-		command := strings.Fields(text)[0]
-		message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: len(command)}}
-	}
-	return &models.Update{Message: message}
-}
-
-func TestHandleStartsEveryMainCommand(t *testing.T) {
-	for _, tc := range []struct {
-		command string
-		want    flows.Flow
-	}{
-		{"/addword", &flows.Addword{}},
-		{"/words", &flows.Words{}},
-		{"/addsource", &flows.Addsource{}},
-		{"/sources", nil},
-	} {
-		t.Run(tc.command, func(t *testing.T) {
-			d := New(testDictionary{}, &testStore{})
-			key := sessionKey{chatID: 10, userID: 42}
-			previous := &testFlow{}
-			d.sessions[key] = previous
-			b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			d.Handle(context.Background(), b, commandUpdate(42, 10, tc.command))
-			if previous.calls != 0 || reflect.TypeOf(d.sessions[key]) != reflect.TypeOf(tc.want) {
-				t.Fatalf("wrong command flow: got %T want %T previouscalls=%d", d.sessions[key], tc.want, previous.calls)
-			}
-		})
-	}
-}
-
-func TestHandleCommandRecognition(t *testing.T) {
-	entity := func(offset, length int) []models.MessageEntity {
-		return []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: offset, Length: length}}
-	}
-	for _, tc := range []struct {
-		name, text string
-		entities   []models.MessageEntity
-		restart    bool
-	}{
-		{"plain command", "/words", entity(0, 6), true},
-		{"arguments", "/words anything", entity(0, 6), true},
-		{"multiline arguments", "/words\nanything", entity(0, 6), true},
-		{"missing entity", "/words", nil, false},
-		{"unknown command", "/unknown", entity(0, 8), false},
-		{"flow command", "/cancel", entity(0, 7), false},
-		{"case sensitive", "/Words", entity(0, 6), false},
-		{"addressed command", "/words@my_bot", entity(0, 13), false},
-		{"middle of text", "hi /words", entity(3, 6), false},
-		{"unicode prefix", "📖 /words", entity(3, 6), false},
-		{"caption", "", entity(0, 6), false},
-		{"negative offset", "/words", entity(-1, 6), false},
-		{"negative length", "/words", entity(0, -1), false},
-		{"zero length", "/words", entity(0, 0), false},
-		{"slash only", "/", entity(0, 1), false},
-		{"out of bounds", "/words", entity(0, 99), false},
-		{"overflow length", "/words", entity(0, int(^uint(0)>>1)), false},
-		{"overflow offset", "/words", entity(int(^uint(0)>>1), 6), false},
-		{"wrong entity", "/words", []models.MessageEntity{{Type: models.MessageEntityTypeBold, Length: 6}}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := New(testDictionary{}, &testStore{})
-			key := sessionKey{chatID: 10, userID: 42}
-			previous := &testFlow{}
-			d.sessions[key] = previous
-			b, err := bot.New("1:test", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, &http.Client{Transport: telegramTransport{}}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			update := &models.Update{Message: &models.Message{Chat: models.Chat{ID: 10}, From: &models.User{ID: 42}, Text: tc.text, Entities: tc.entities}}
-			d.Handle(context.Background(), b, update)
-			if tc.restart {
-				if _, ok := d.sessions[key].(*flows.Words); !ok || previous.calls != 0 {
-					t.Fatalf("command did not replace flow: %T calls=%d", d.sessions[key], previous.calls)
+func TestSessionsPreserveFIFOWithoutBlockingEachOther(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	replies := make(chan flows.Message, 10)
+	d := testDispatcher(t, func() flows.Flow {
+		return flowFunc(func(ctx context.Context, m flows.Message) flows.Result {
+			if m.UserID == 1 && m.Text == "/start" {
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
 				}
-			} else if d.sessions[key] != previous || previous.calls != 1 {
-				t.Fatalf("message not passed to existing flow: %T calls=%d", d.sessions[key], previous.calls)
 			}
+			replies <- m
+			return flows.Result{}
 		})
+	}, senderFunc(func(context.Context, int64, string) error { return nil }))
+	enqueue(t, d, message(1, "/start"))
+	receive(t, entered)
+	enqueue(t, d, message(1, "book"))
+	enqueue(t, d, message(1, "1"))
+	enqueue(t, d, message(2, "/start"))
+	if got := receive(t, replies); got.UserID != 2 {
+		t.Fatalf("other session blocked: %+v", got)
 	}
-	d := New(nil, nil)
-	for _, u := range []*models.Update{nil, {}, {Message: &models.Message{}}, commandUpdate(42, 10, "/unknown"), commandUpdate(42, 10, "text")} {
-		d.Handle(context.Background(), nil, u)
+	close(release)
+	for _, want := range []string{"/start", "book", "1"} {
+		if got := receive(t, replies); got.Text != want || got.UserID != 1 {
+			t.Fatalf("FIFO: %+v want %s", got, want)
+		}
 	}
-	if len(d.sessions) != 0 {
-		t.Fatal("invalid/unrouted input created a session")
+}
+
+func TestRestartAndCompletionReleasePreviousFlow(t *testing.T) {
+	replies := make(chan string, 10)
+	created := 0
+	d := testDispatcher(t, func() flows.Flow {
+		created++
+		id := created
+		return flowFunc(func(_ context.Context, m flows.Message) flows.Result {
+			return flows.Result{Texts: []string{strings.Repeat("x", id) + m.Text}, Done: m.Text == "/cancel"}
+		})
+	}, senderFunc(func(_ context.Context, _ int64, text string) error { replies <- text; return nil }))
+	for _, input := range []string{"/start", "hello", "/start", "/cancel", "ignored", "/start"} {
+		enqueue(t, d, message(1, input))
 	}
+	var got []string
+	for range 5 {
+		got = append(got, receive(t, replies))
+	}
+	if want := []string{"x/start", "xhello", "xx/start", "xx/cancel", "xxx/start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestQueueOverflowDoesNotBlockOtherSessions(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	replies := make(chan string, 100)
+	d := testDispatcher(t, func() flows.Flow {
+		return flowFunc(func(ctx context.Context, m flows.Message) flows.Result {
+			if m.UserID == 1 && m.Text == "/start" {
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			}
+			return flows.Result{Texts: []string{m.Text}}
+		})
+	}, senderFunc(func(_ context.Context, _ int64, text string) error { replies <- text; return nil }))
+	enqueue(t, d, message(1, "/start"))
+	receive(t, entered)
+	for range 32 {
+		enqueue(t, d, message(1, "queued"))
+	}
+	for range 3 {
+		if err := d.Enqueue(message(1, "rejected")); !errors.Is(err, ErrQueueFull) {
+			t.Fatalf("overflow: %v", err)
+		}
+	}
+	enqueue(t, d, message(2, "/start"))
+	if got := receive(t, replies); got != "/start" {
+		t.Fatal(got)
+	}
+	close(release)
+	for range 33 {
+		if got := receive(t, replies); got == "rejected" {
+			t.Fatal("rejected message was processed")
+		}
+	}
+	if got := receive(t, replies); !strings.Contains(got, "повтор") {
+		t.Fatalf("missing overflow notice: %s", got)
+	}
+}
+
+func TestSendFailureDoesNotRepeatCompletedOperation(t *testing.T) {
+	replies := make(chan string, 10)
+	saves := 0
+	d := testDispatcher(t, func() flows.Flow {
+		return flowFunc(func(_ context.Context, m flows.Message) flows.Result {
+			if m.Text == "save" {
+				saves++
+				return flows.Result{Texts: []string{"saved", "must not send"}, Done: true}
+			}
+			return flows.Result{Texts: []string{m.Text}}
+		})
+	}, senderFunc(func(_ context.Context, _ int64, text string) error {
+		replies <- text
+		if text == "saved" {
+			return errors.New("delivery failed")
+		}
+		return nil
+	}))
+	for _, input := range []string{"/start", "save", "save", "/start"} {
+		enqueue(t, d, message(1, input))
+	}
+	for _, want := range []string{"/start", "saved", "/start"} {
+		if got := receive(t, replies); got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	}
+	d.Close()
+	if saves != 1 {
+		t.Fatalf("saved %d times", saves)
+	}
+}
+
+type fakeClock struct {
+	mu    sync.Mutex
+	value time.Time
+}
+
+func (c *fakeClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.value }
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.value = c.value.Add(d)
+}
+
+func TestExpiryKeepsBusyAndQueuedSessions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := &fakeClock{value: time.Unix(100, 0)}
+		entered, release := make(chan struct{}), make(chan struct{})
+		replies := make(chan string, 10)
+		d := New(context.Background(), nil, nil, senderFunc(func(_ context.Context, _ int64, text string) error { replies <- text; return nil }))
+		d.now = clock.Now
+		d.factories = map[string]func() flows.Flow{"start": func() flows.Flow {
+			return flowFunc(func(ctx context.Context, m flows.Message) flows.Result {
+				if m.Text == "block" {
+					close(entered)
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+				return flows.Result{Texts: []string{m.Text}}
+			})
+		}}
+		t.Cleanup(d.Close)
+		enqueue(t, d, message(1, "/start"))
+		receive(t, replies)
+		enqueue(t, d, message(1, "block"))
+		receive(t, entered)
+		enqueue(t, d, message(1, "queued"))
+		clock.Advance(31 * time.Minute)
+		d.expire(clock.Now())
+		close(release)
+		for _, want := range []string{"block", "queued"} {
+			if got := receive(t, replies); got != want {
+				t.Fatalf("lost pending session: %s", got)
+			}
+		}
+		synctest.Wait()
+		clock.Advance(31 * time.Minute)
+		d.expire(clock.Now())
+		d.mu.Lock()
+		count := len(d.sessions)
+		d.mu.Unlock()
+		if count != 0 {
+			t.Fatalf("idle session not removed: %d", count)
+		}
+	})
+}
+
+func TestIdleSessionExpiresAndMustRestart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := &fakeClock{value: time.Unix(100, 0)}
+		replies := make(chan string, 10)
+		d := New(context.Background(), nil, nil, senderFunc(func(_ context.Context, _ int64, text string) error { replies <- text; return nil }))
+		d.now = clock.Now
+		d.factories = map[string]func() flows.Flow{"start": func() flows.Flow {
+			return flowFunc(func(_ context.Context, m flows.Message) flows.Result { return flows.Result{Texts: []string{m.Text}} })
+		}}
+		t.Cleanup(d.Close)
+		enqueue(t, d, message(1, "/start"))
+		receive(t, replies)
+		synctest.Wait()
+		clock.Advance(30 * time.Minute)
+		d.expire(clock.Now())
+		enqueue(t, d, message(1, "orphan"))
+		synctest.Wait()
+		select {
+		case got := <-replies:
+			t.Fatalf("expired flow answered: %s", got)
+		default:
+		}
+		enqueue(t, d, message(1, "/start"))
+		if got := receive(t, replies); got != "/start" {
+			t.Fatalf("restart: %s", got)
+		}
+	})
+}
+
+func TestCloseCancelsActiveWorkAndRejectsNewMessages(t *testing.T) {
+	entered, stopped := make(chan struct{}), make(chan struct{})
+	d := testDispatcher(t, func() flows.Flow {
+		return flowFunc(func(ctx context.Context, m flows.Message) flows.Result {
+			close(entered)
+			<-ctx.Done()
+			close(stopped)
+			return flows.Result{}
+		})
+	}, senderFunc(func(context.Context, int64, string) error { return nil }))
+	enqueue(t, d, message(1, "/start"))
+	receive(t, entered)
+	enqueue(t, d, message(1, "queued"))
+	d.Close()
+	receive(t, stopped)
+	if err := d.Enqueue(message(1, "/start")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("enqueue after close: %v", err)
+	}
+	d.Close()
 }

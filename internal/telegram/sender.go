@@ -1,21 +1,24 @@
-package flows
+package telegram
 
 import (
 	"context"
-	"log"
 	"time"
 	"unicode/utf16"
 
 	tg "github.com/go-telegram/bot"
 )
 
-func sendText(ctx context.Context, bot *tg.Bot, chatID int64, text string) error {
+type Sender struct{ Bot *tg.Bot }
+
+func (s Sender) SendText(ctx context.Context, chatID int64, text string) error {
 	for _, chunk := range splitText(text) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err := bot.SendMessage(sendCtx, &tg.SendMessageParams{ChatID: chatID, Text: chunk})
+		_, err := s.Bot.SendMessage(sendCtx, &tg.SendMessageParams{ChatID: chatID, Text: chunk})
 		cancel()
 		if err != nil {
-			log.Printf("send message to chat %d failed: %v", chatID, err)
 			return err
 		}
 	}

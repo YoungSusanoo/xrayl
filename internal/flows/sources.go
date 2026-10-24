@@ -5,10 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
-
-	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 
 	"xrayl/internal/storage"
 )
@@ -22,9 +18,7 @@ type sourcePage struct {
 }
 
 func (page *sourcePage) load(ctx context.Context, store SourceReader, userID int64, offset int) (bool, error) {
-	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := store.ListSources(readCtx, userID, sourcePageSize+1, offset)
+	items, err := store.ListSources(ctx, userID, sourcePageSize+1, offset)
 	if err != nil {
 		return false, err
 	}
@@ -63,15 +57,10 @@ type Sources struct {
 }
 
 func NewSources(store SourceReader) *Sources { return &Sources{store: store} }
-func (flow *Sources) Handle(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	if update == nil || update.Message == nil || update.Message.From == nil {
-		return false
-	}
-	text := strings.TrimSpace(update.Message.Text)
-	chatID := update.Message.Chat.ID
+func (flow *Sources) Handle(ctx context.Context, message Message) Result {
+	text := strings.TrimSpace(message.Text)
 	if text == "/cancel" {
-		sendText(ctx, bot, chatID, "Просмотр завершён.")
-		return true
+		return Result{Texts: []string{"Просмотр завершён."}, Done: true}
 	}
 	offset := 0
 	if flow.loaded {
@@ -79,31 +68,25 @@ func (flow *Sources) Handle(ctx context.Context, bot *tg.Bot, update *models.Upd
 		var handled bool
 		offset, notice, handled = flow.page.navigation(text)
 		if !handled {
-			sendText(ctx, bot, chatID, "Используй /next, /prev или /cancel. Новый источник — /addsource.")
-			return false
+			return Result{Texts: []string{"Используй /next, /prev или /cancel. Новый источник — /addsource."}}
 		}
 		if notice != "" {
-			sendText(ctx, bot, chatID, notice)
-			return false
+			return Result{Texts: []string{notice}}
 		}
 	}
-	found, err := flow.page.load(ctx, flow.store, update.Message.From.ID, offset)
+	found, err := flow.page.load(ctx, flow.store, message.UserID, offset)
 	if err != nil {
 		log.Printf("load sources failed: %v", err)
-		sendText(ctx, bot, chatID, "Не удалось загрузить источники. Повтори команду или /sources.")
-		return false
+		return Result{Texts: []string{"Не удалось загрузить источники. Повтори команду или /sources."}}
 	}
 	if !found {
 		if offset == 0 {
-			sendText(ctx, bot, chatID, "Источников пока нет. Добавь первый через /addsource.")
-			return true
+			return Result{Texts: []string{"Источников пока нет. Добавь первый через /addsource."}, Done: true}
 		}
-		sendText(ctx, bot, chatID, "На этой странице нет источников. Открой список через /sources.")
-		return false
+		return Result{Texts: []string{"На этой странице нет источников. Открой список через /sources."}}
 	}
 	flow.loaded = true
-	sendText(ctx, bot, chatID, formatSourcesPage(flow.page, false))
-	return false
+	return Result{Texts: []string{formatSourcesPage(flow.page, false)}}
 }
 
 type Addsource struct {
@@ -112,39 +95,28 @@ type Addsource struct {
 }
 
 func NewAddsource(store SourceWriter) *Addsource { return &Addsource{store: store} }
-func (flow *Addsource) Handle(ctx context.Context, bot *tg.Bot, update *models.Update) bool {
-	if update == nil || update.Message == nil || update.Message.From == nil {
-		return false
-	}
-	text := strings.TrimSpace(update.Message.Text)
-	chatID := update.Message.Chat.ID
+func (flow *Addsource) Handle(ctx context.Context, message Message) Result {
+	text := strings.TrimSpace(message.Text)
 	if text == "/cancel" {
-		sendText(ctx, bot, chatID, "Добавление источника отменено.")
-		return true
+		return Result{Texts: []string{"Добавление источника отменено."}, Done: true}
 	}
 	if !flow.waiting {
 		flow.waiting = true
-		sendText(ctx, bot, chatID, "Введи название источника или /cancel.")
-		return false
+		return Result{Texts: []string{"Введи название источника или /cancel."}}
 	}
 	if text == "" || strings.HasPrefix(text, "/") {
-		sendText(ctx, bot, chatID, "Введи название текстом или /cancel.")
-		return false
+		return Result{Texts: []string{"Введи название текстом или /cancel."}}
 	}
-	saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	result, err := flow.store.AddSource(saveCtx, update.Message.From.ID, text)
-	cancel()
+	saved, err := flow.store.AddSource(ctx, message.UserID, text)
 	if err != nil {
 		log.Printf("save source failed: %v", err)
-		sendText(ctx, bot, chatID, "Не удалось сохранить источник. Повтори название или /cancel.")
-		return false
+		return Result{Texts: []string{"Не удалось сохранить источник. Повтори название или /cancel."}}
 	}
 	status := "Источник добавлен: "
-	if !result.Created {
+	if !saved.Created {
 		status = "Источник уже есть: "
 	}
-	sendText(ctx, bot, chatID, status+result.Source.Name)
-	return true
+	return Result{Texts: []string{status + saved.Source.Name}, Done: true}
 }
 
 func formatSourcesPage(page sourcePage, selecting bool) string {

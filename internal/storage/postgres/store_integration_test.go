@@ -11,14 +11,12 @@ import (
 	"time"
 
 	"xrayl/internal/storage"
+	"xrayl/internal/testutil"
 )
 
 func requireSynonyms(t *testing.T, db *sql.DB, id int64, want string) {
 	t.Helper()
-	var got string
-	if err := db.QueryRow("SELECT array_to_json(synonyms)::text FROM meanings WHERE id = $1", id).Scan(&got); err != nil || got != want {
-		t.Fatalf("synonyms: got %s, want %s, err=%v", got, want, err)
-	}
+	testutil.RequireSynonyms(t, db, id, want)
 }
 
 func addSynonyms(ctx context.Context, db *sql.DB, userID int64, word, definition string, synonyms any) (storage.AddMeaningResult, error) {

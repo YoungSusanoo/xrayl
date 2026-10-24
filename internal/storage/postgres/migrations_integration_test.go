@@ -6,48 +6,17 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"os"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"xrayl/internal/testutil"
 )
 
 func testDatabase(t *testing.T) *sql.DB {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Fatal("TEST_DATABASE_URL must point to a separate test database")
-	}
-	cfg, err := pgx.ParseConfig(url)
-	if err != nil {
-		t.Fatal("invalid TEST_DATABASE_URL")
-	}
-	admin := stdlib.OpenDB(*cfg)
-	schema := fmt.Sprintf("migration_test_%d", time.Now().UnixNano())
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	cfg.RuntimeParams["search_path"] = schema
-	cfg.RuntimeParams["statement_timeout"] = "10000"
-	db := stdlib.OpenDB(*cfg)
-	t.Cleanup(func() {
-		db.Close()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		if _, err := admin.ExecContext(cleanupCtx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Errorf("clean up test schema: %v", err)
-		}
-		admin.Close()
-	})
-	return db
+	return testutil.Database(t)
 }
 
 func migrateTestDatabase(t *testing.T) *sql.DB {

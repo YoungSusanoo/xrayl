@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"xrayl/internal/testutil"
 )
 
 type meaningResult struct {
@@ -35,15 +37,7 @@ func requireSQLState(t *testing.T, err error, code string) {
 
 func requireEntryCounts(t *testing.T, db *sql.DB, users, words, meanings int) {
 	t.Helper()
-	for table, want := range map[string]int{"users": users, "words": words, "meanings": meanings} {
-		var count int
-		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		if count != want {
-			t.Fatalf("%s: wanted %d rows, got %d", table, want, count)
-		}
-	}
+	testutil.RequireEntryCounts(t, db, users, words, meanings)
 }
 
 func TestAddWordMeaningCreatesAndReusesEntries(t *testing.T) {

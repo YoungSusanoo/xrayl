@@ -1,6 +1,6 @@
 //go:build integration
 
-package postgres
+package integration
 
 import (
 	"context"
@@ -17,6 +17,8 @@ import (
 
 	"xrayl/internal/dictionary/freedictionaryapi"
 	"xrayl/internal/dispatcher"
+	"xrayl/internal/storage/postgres"
+	"xrayl/internal/testutil"
 )
 
 func TestContextHTTPToPostgres(t *testing.T) {
@@ -42,7 +44,7 @@ func TestContextHTTPToPostgres(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
 	}))
 	defer telegramServer.Close()
-	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), NewStore(db))
+	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), postgres.NewStore(db))
 	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(), tg.WithDefaultHandler(d.Handle))
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +79,7 @@ func TestContextHTTPToPostgres(t *testing.T) {
 	if got := send(42, "1"); !strings.Contains(got, "номер источника") {
 		t.Fatalf("missing source selection: %s", got)
 	}
-	requireEntryCounts(t, db, 1, 1, 1)
+	testutil.RequireEntryCounts(t, db, 1, 1, 1)
 	var count int
 	if err := db.QueryRow("SELECT count(*) FROM contexts").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("premature context: %d %v", count, err)
@@ -105,7 +107,7 @@ func TestContextHTTPToPostgres(t *testing.T) {
 	if got := send(42, "page 4"); got != "" {
 		t.Fatalf("canceled session responded: %s", got)
 	}
-	requireEntryCounts(t, db, 1, 1, 2)
+	testutil.RequireEntryCounts(t, db, 1, 1, 2)
 	if err := db.QueryRow("SELECT count(*) FROM contexts").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("contexts after cancel/skip: %d %v", count, err)
 	}

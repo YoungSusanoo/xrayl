@@ -1,6 +1,6 @@
 //go:build integration
 
-package postgres
+package integration
 
 import (
 	"context"
@@ -18,6 +18,8 @@ import (
 
 	"xrayl/internal/dictionary/freedictionaryapi"
 	"xrayl/internal/dispatcher"
+	"xrayl/internal/storage/postgres"
+	"xrayl/internal/testutil"
 )
 
 func TestAddwordHTTPToPostgres(t *testing.T) {
@@ -53,7 +55,7 @@ func TestAddwordHTTPToPostgres(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
 	}))
 	defer telegramServer.Close()
-	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL+"/api/v1", dictionaryServer.Client()), NewStore(db))
+	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL+"/api/v1", dictionaryServer.Client()), postgres.NewStore(db))
 	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
 		tg.WithDefaultHandler(d.Handle))
 	if err != nil {
@@ -70,26 +72,26 @@ func TestAddwordHTTPToPostgres(t *testing.T) {
 	send(42, "/addword")
 	send(42, "book")
 	send(42, "99")
-	requireEntryCounts(t, db, 0, 0, 0)
+	testutil.RequireEntryCounts(t, db, 0, 0, 0)
 	send(42, "1")
 	var meaningID int64
 	if err := db.QueryRow("SELECT id FROM meanings WHERE user_id=42").Scan(&meaningID); err != nil {
 		t.Fatal(err)
 	}
-	requireSynonyms(t, db, meaningID, `["Volume","Tome"]`)
+	testutil.RequireSynonyms(t, db, meaningID, `["Volume","Tome"]`)
 	send(42, "1")
-	requireEntryCounts(t, db, 1, 1, 1)
+	testutil.RequireEntryCounts(t, db, 1, 1, 1)
 	for _, want := range []string{`["publication"]`, `[]`} {
 		send(42, "/addword")
 		send(42, "book")
 		send(42, "1")
-		requireSynonyms(t, db, meaningID, want)
-		requireEntryCounts(t, db, 1, 1, 1)
+		testutil.RequireSynonyms(t, db, meaningID, want)
+		testutil.RequireEntryCounts(t, db, 1, 1, 1)
 	}
 	send(43, "/addword")
 	send(43, "book")
 	send(43, "2")
-	requireEntryCounts(t, db, 2, 2, 2)
+	testutil.RequireEntryCounts(t, db, 2, 2, 2)
 	var definition string
 	if err := db.QueryRow("SELECT definition FROM meanings WHERE user_id=43").Scan(&definition); err != nil || definition != "An account record." {
 		t.Fatalf("wrong selection saved: %q, %v", definition, err)
@@ -98,7 +100,7 @@ func TestAddwordHTTPToPostgres(t *testing.T) {
 	send(44, "book")
 	send(44, "/cancel")
 	send(44, "1")
-	requireEntryCounts(t, db, 2, 2, 2)
+	testutil.RequireEntryCounts(t, db, 2, 2, 2)
 	if lookups.Load() != 5 {
 		t.Fatalf("selection triggered extra lookups: %d", lookups.Load())
 	}

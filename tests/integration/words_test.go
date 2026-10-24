@@ -1,6 +1,6 @@
 //go:build integration
 
-package postgres
+package integration
 
 import (
 	"context"
@@ -17,6 +17,8 @@ import (
 
 	"xrayl/internal/dictionary/freedictionaryapi"
 	"xrayl/internal/dispatcher"
+	"xrayl/internal/storage/postgres"
+	"xrayl/internal/testutil"
 )
 
 func TestWordsHTTPToPostgres(t *testing.T) {
@@ -46,7 +48,7 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":10,"type":"private"}}}`)
 	}))
 	defer telegramServer.Close()
-	store := NewStore(db)
+	store := postgres.NewStore(db)
 	d := dispatcher.New(freedictionaryapi.NewClient(dictionaryServer.URL, dictionaryServer.Client()), store)
 	b, err := tg.New("1:test", tg.WithSkipGetMe(), tg.WithServerURL(telegramServer.URL), tg.WithNotAsyncHandlers(),
 		tg.WithDefaultHandler(d.Handle))
@@ -115,5 +117,5 @@ func TestWordsHTTPToPostgres(t *testing.T) {
 	if lookups.Load() != 3 {
 		t.Fatalf("browsing queried external dictionary: %d lookups", lookups.Load())
 	}
-	requireEntryCounts(t, db, 2, 3, 4)
+	testutil.RequireEntryCounts(t, db, 2, 3, 4)
 }

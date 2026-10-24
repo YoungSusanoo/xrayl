@@ -132,6 +132,20 @@ docker compose -p xrayl-migrations-test -f compose.test.yaml down
 и укажите такой же порт в `TEST_DATABASE_URL`. Тесты требуют явный
 `TEST_DATABASE_URL`; `DATABASE_URL` бота вместо него не подставляется.
 Каждый тест создаёт отдельную схему и удаляет собственную схему после работы.
+Общая подготовка БД находится в [internal/testutil](../internal/testutil) и
+доступна только при сборке с тегом `integration`. Имена схем генерируются
+случайно, чтобы параллельно запускаемые тестовые пакеты не пересекались.
+
+Проверки SQL-функций, хранилища и миграций остаются в
+[internal/storage/postgres](../internal/storage/postgres). Сквозные сценарии
+Telegram → диспетчер → словарь → PostgreSQL находятся отдельно в
+[tests/integration](../tests/integration). Оба набора включаются общим тегом.
+Для запуска только сквозных сценариев при работающей тестовой БД:
+
+```sh
+TEST_DATABASE_URL='postgres://xrayl:xrayl_test@127.0.0.1:55432/xrayl_test?sslmode=disable' \
+  go test -race -tags integration -count=1 ./tests/integration
+```
 
 Проверяются миграции и откаты, ограничения схемы, атомарность и конкурентные
 вызовы функций, нормализация синонимов, изоляция пользователей, отмена
